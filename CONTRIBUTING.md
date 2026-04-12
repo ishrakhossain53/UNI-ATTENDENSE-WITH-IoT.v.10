@@ -26,7 +26,7 @@ Thank you for your interest in contributing! This document provides guidelines a
 1. **Fork the repository**
 2. **Clone your fork**:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/ASE.git
+   git clone https://github.com/ishrakhossain53/UNI-ATTENDENSE-WITH-IoT.v.10.git
    cd ASE
    ```
 3. **Add upstream remote**:
