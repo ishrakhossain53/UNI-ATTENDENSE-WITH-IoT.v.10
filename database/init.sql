@@ -179,6 +179,30 @@ CREATE TABLE attendance_records_2026_11 PARTITION OF attendance_records
     FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
 CREATE TABLE attendance_records_2026_12 PARTITION OF attendance_records
     FOR VALUES FROM ('2026-12-01') TO ('2027-01-01');
+CREATE TABLE attendance_records_2027_01 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-01-01') TO ('2027-02-01');
+CREATE TABLE attendance_records_2027_02 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-02-01') TO ('2027-03-01');
+CREATE TABLE attendance_records_2027_03 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-03-01') TO ('2027-04-01');
+CREATE TABLE attendance_records_2027_04 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-04-01') TO ('2027-05-01');
+CREATE TABLE attendance_records_2027_05 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-05-01') TO ('2027-06-01');
+CREATE TABLE attendance_records_2027_06 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-06-01') TO ('2027-07-01');
+CREATE TABLE attendance_records_2027_07 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-07-01') TO ('2027-08-01');
+CREATE TABLE attendance_records_2027_08 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-08-01') TO ('2027-09-01');
+CREATE TABLE attendance_records_2027_09 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-09-01') TO ('2027-10-01');
+CREATE TABLE attendance_records_2027_10 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-10-01') TO ('2027-11-01');
+CREATE TABLE attendance_records_2027_11 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-11-01') TO ('2027-12-01');
+CREATE TABLE attendance_records_2027_12 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-12-01') TO ('2028-01-01');
 
 -- Audit log
 CREATE TABLE audit_log (
@@ -206,6 +230,7 @@ CREATE TABLE gateway_queue (
 CREATE INDEX idx_attendance_student ON attendance_records(student_id);
 CREATE INDEX idx_attendance_classroom ON attendance_records(classroom_id);
 CREATE INDEX idx_attendance_timestamp ON attendance_records(timestamp DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_device_sync_log_device_template ON device_sync_log(device_id, template_id);
 CREATE INDEX idx_audit_user ON audit_log(user_id);
 CREATE INDEX idx_audit_created ON audit_log(created_at DESC);
 CREATE INDEX idx_templates_student ON fingerprint_templates(student_id);
@@ -382,9 +407,10 @@ BEGIN
         cur_day_name := TRIM(TO_CHAR(cur_date, 'Day'));
 
         IF cur_day_name IN ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday') THEN
-            SELECT cs.schedule_id, cs.classroom_id, cs.start_time
+            SELECT cs.schedule_id, cs.classroom_id, cs.start_time, cl.device_id
             INTO schedule_record
             FROM class_schedule cs
+            JOIN classrooms cl ON cl.classroom_id = cs.classroom_id
             WHERE EXTRACT(DOW FROM cur_date) =
                   CASE cur_day_name
                       WHEN 'Monday' THEN 1
@@ -411,7 +437,7 @@ BEGIN
                     VALUES (
                         random_student_id,
                         schedule_record.classroom_id,
-                        'ESP32_CLASSROOM_' || SUBSTRING(cur_date::TEXT, 9, 2) || SUBSTRING(cur_date::TEXT, 6, 2),
+                        schedule_record.device_id,
                         record_timestamp,
                         85 + (RANDOM() * 15)::INT,
                         75 + (RANDOM() * 25)::INT,
@@ -433,3 +459,30 @@ END $$;
 SELECT COUNT(*) as total_attendance_records FROM attendance_records;
 SELECT COUNT(*) as total_enrolled_students FROM students WHERE fp_enrolled = TRUE;
 SELECT COUNT(*) as total_users FROM users;
+
+-- MIGRATION v1.1: sync upsert key + future attendance partitions
+CREATE UNIQUE INDEX IF NOT EXISTS uq_device_sync_log_device_template ON device_sync_log(device_id, template_id);
+CREATE TABLE IF NOT EXISTS attendance_records_2027_01 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-01-01') TO ('2027-02-01');
+CREATE TABLE IF NOT EXISTS attendance_records_2027_02 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-02-01') TO ('2027-03-01');
+CREATE TABLE IF NOT EXISTS attendance_records_2027_03 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-03-01') TO ('2027-04-01');
+CREATE TABLE IF NOT EXISTS attendance_records_2027_04 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-04-01') TO ('2027-05-01');
+CREATE TABLE IF NOT EXISTS attendance_records_2027_05 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-05-01') TO ('2027-06-01');
+CREATE TABLE IF NOT EXISTS attendance_records_2027_06 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-06-01') TO ('2027-07-01');
+CREATE TABLE IF NOT EXISTS attendance_records_2027_07 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-07-01') TO ('2027-08-01');
+CREATE TABLE IF NOT EXISTS attendance_records_2027_08 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-08-01') TO ('2027-09-01');
+CREATE TABLE IF NOT EXISTS attendance_records_2027_09 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-09-01') TO ('2027-10-01');
+CREATE TABLE IF NOT EXISTS attendance_records_2027_10 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-10-01') TO ('2027-11-01');
+CREATE TABLE IF NOT EXISTS attendance_records_2027_11 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-11-01') TO ('2027-12-01');
+CREATE TABLE IF NOT EXISTS attendance_records_2027_12 PARTITION OF attendance_records
+    FOR VALUES FROM ('2027-12-01') TO ('2028-01-01');
