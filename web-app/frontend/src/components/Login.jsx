@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Paper, TextField, Button, Box, Typography, Alert,
@@ -13,7 +13,27 @@ function Login() {
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [healthChecking, setHealthChecking] = useState(true)
+  const [dbUnavailable, setDbUnavailable] = useState(false)
   const { login } = useAuthStore()
+
+  useEffect(() => {
+    const checkDbHealth = async () => {
+      setHealthChecking(true)
+      setDbUnavailable(false)
+      try {
+        await api.get('/health/db')
+      } catch (err) {
+        if (err.response?.status === 503) {
+          setDbUnavailable(true)
+        }
+      } finally {
+        setHealthChecking(false)
+      }
+    }
+
+    checkDbHealth()
+  }, [])
   
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -21,13 +41,20 @@ function Login() {
     setError('')
     
     try {
+      if (dbUnavailable) {
+        return
+      }
       const response = await api.post('/auth/login', { username, password })
       const { token, user } = response.data
       
       login(token, user)
       navigate(`/${user.role}`)
     } catch (err) {
-      setError(err.response?.data?.detail || 'Login failed')
+      if (err.response?.status === 401) {
+        setError('Invalid username or password. If you are a new user, contact your administrator.')
+      } else {
+        setError(err.response?.data?.detail || 'Login failed')
+      }
     } finally {
       setLoading(false)
     }
@@ -39,6 +66,18 @@ function Login() {
         <Typography variant="h4" sx={{ mb: 4, textAlign: 'center' }}>
           Attendance System Login
         </Typography>
+
+        {healthChecking && (
+          <Alert severity="info" sx={{ mb: 2 }}>
+            Checking system status...
+          </Alert>
+        )}
+
+        {!healthChecking && dbUnavailable && (
+          <Alert severity="error" sx={{ mb: 2 }}>
+            Database unavailable. Contact administrator.
+          </Alert>
+        )}
         
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
         
@@ -67,7 +106,7 @@ function Login() {
             fullWidth
             variant="contained"
             sx={{ mt: 3 }}
-            disabled={loading || !username || !password}
+            disabled={loading || healthChecking || dbUnavailable || !username || !password}
             onClick={handleSubmit}
           >
             {loading ? <CircularProgress size={24} /> : 'Login'}

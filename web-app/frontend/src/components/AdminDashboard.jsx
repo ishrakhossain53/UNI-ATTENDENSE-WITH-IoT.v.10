@@ -3,7 +3,7 @@ import {
   Box, Card, CardContent, Grid, Paper, Tabs, Tab, Typography,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
   Button, Dialog, DialogTitle, DialogContent, DialogActions, TextField,
-  Alert, Chip, CircularProgress
+  Alert, Chip, CircularProgress, Collapse, IconButton
 } from '@mui/material'
 import { Line, Bar, Doughnut } from 'react-chartjs-2'
 import {
@@ -25,7 +25,13 @@ function TabPanel({ children, value, index }) {
 
 function AdminDashboard() {
   const [tabIndex, setTabIndex] = useState(0)
+  const [profileExpanded, setProfileExpanded] = useState(true)
+  const [profile, setProfile] = useState(null)
   const [students, setStudents] = useState([])
+  const [users, setUsers] = useState([])
+  const [usersLoading, setUsersLoading] = useState(false)
+  const [userRoleFilter, setUserRoleFilter] = useState('all')
+  const [userStatusFilter, setUserStatusFilter] = useState('all')
   const [devices, setDevices] = useState([])
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -58,8 +64,24 @@ function AdminDashboard() {
   // Dialogs
   const [enrollDialog, setEnrollDialog] = useState(false)
   const [selectedStudent, setSelectedStudent] = useState(null)
-  const [addStudentDialog, setAddStudentDialog] = useState(false)
-  const [newStudent, setNewStudent] = useState({ student_number: '', full_name: '', department: '', semester: '' })
+  const [createUserDialog, setCreateUserDialog] = useState(false)
+  const [createStep, setCreateStep] = useState(1)
+  const [createdCredential, setCreatedCredential] = useState(null)
+  const [newUser, setNewUser] = useState({
+    role: 'student',
+    full_name: '',
+    email: '',
+    username: '',
+    password: '',
+    confirm_password: '',
+    student_number: '',
+    department: '',
+    semester: '',
+    employee_id: ''
+  })
+  const [resetPasswordDialog, setResetPasswordDialog] = useState(false)
+  const [selectedUser, setSelectedUser] = useState(null)
+  const [newPassword, setNewPassword] = useState('')
   
   useEffect(() => {
     loadData()
@@ -82,21 +104,45 @@ function AdminDashboard() {
   const loadData = async () => {
     setLoading(true)
     try {
-      const [studentsRes, devicesRes, statsRes] = await Promise.all([
+      const [studentsRes, devicesRes, statsRes, profileRes] = await Promise.all([
         api.get('/students'),
         api.get('/devices'),
-        api.get('/attendance/stats')
+        api.get('/attendance/stats'),
+        api.get('/users/me/profile')
       ])
       
       setStudents(studentsRes.data)
       setDevices(devicesRes.data)
       setStats(statsRes.data)
+      setProfile(profileRes.data)
+      loadUsers()
     } catch (err) {
       setError('Failed to load data')
     } finally {
       setLoading(false)
     }
   }
+
+  const loadUsers = async () => {
+    setUsersLoading(true)
+    try {
+      const params = new URLSearchParams()
+      if (userRoleFilter !== 'all') params.append('role', userRoleFilter)
+      if (userStatusFilter !== 'all') params.append('is_active', String(userStatusFilter === 'active'))
+      const res = await api.get(`/admin/users?${params.toString()}`)
+      setUsers(res.data || [])
+    } catch {
+      setError('Failed to load users')
+    } finally {
+      setUsersLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (tabIndex === 2) {
+      loadUsers()
+    }
+  }, [tabIndex, userRoleFilter, userStatusFilter])
   
   const handleEnroll = async () => {
     if (!selectedStudent) return

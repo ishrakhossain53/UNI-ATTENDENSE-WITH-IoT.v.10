@@ -15,9 +15,11 @@ Complete implementation with:
 import os
 import sys
 import json
+import time
 import logging
 import psycopg2
 from psycopg2 import pool
+from psycopg2 import sql
 import redis
 import jwt
 import bcrypt
@@ -29,12 +31,30 @@ from functools import wraps
 
 from fastapi import FastAPI, HTTPException, Request, Depends, WebSocket, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
+
+# Migration helper (run on existing DBs before 2027 data is inserted)
+# 1) Add unique key for template sync upserts:
+#    CREATE UNIQUE INDEX IF NOT EXISTS uq_device_sync_log_device_template
+#    ON device_sync_log (device_id, template_id);
+# 2) Add missing attendance partitions for 2027:
+#    CREATE TABLE IF NOT EXISTS attendance_records_2027_01 PARTITION OF attendance_records FOR VALUES FROM ('2027-01-01') TO ('2027-02-01');
+#    CREATE TABLE IF NOT EXISTS attendance_records_2027_02 PARTITION OF attendance_records FOR VALUES FROM ('2027-02-01') TO ('2027-03-01');
+#    CREATE TABLE IF NOT EXISTS attendance_records_2027_03 PARTITION OF attendance_records FOR VALUES FROM ('2027-03-01') TO ('2027-04-01');
+#    CREATE TABLE IF NOT EXISTS attendance_records_2027_04 PARTITION OF attendance_records FOR VALUES FROM ('2027-04-01') TO ('2027-05-01');
+#    CREATE TABLE IF NOT EXISTS attendance_records_2027_05 PARTITION OF attendance_records FOR VALUES FROM ('2027-05-01') TO ('2027-06-01');
+#    CREATE TABLE IF NOT EXISTS attendance_records_2027_06 PARTITION OF attendance_records FOR VALUES FROM ('2027-06-01') TO ('2027-07-01');
+#    CREATE TABLE IF NOT EXISTS attendance_records_2027_07 PARTITION OF attendance_records FOR VALUES FROM ('2027-07-01') TO ('2027-08-01');
+#    CREATE TABLE IF NOT EXISTS attendance_records_2027_08 PARTITION OF attendance_records FOR VALUES FROM ('2027-08-01') TO ('2027-09-01');
+#    CREATE TABLE IF NOT EXISTS attendance_records_2027_09 PARTITION OF attendance_records FOR VALUES FROM ('2027-09-01') TO ('2027-10-01');
+#    CREATE TABLE IF NOT EXISTS attendance_records_2027_10 PARTITION OF attendance_records FOR VALUES FROM ('2027-10-01') TO ('2027-11-01');
+#    CREATE TABLE IF NOT EXISTS attendance_records_2027_11 PARTITION OF attendance_records FOR VALUES FROM ('2027-11-01') TO ('2027-12-01');
+#    CREATE TABLE IF NOT EXISTS attendance_records_2027_12 PARTITION OF attendance_records FOR VALUES FROM ('2027-12-01') TO ('2028-01-01');
 
 # Configure logging
 logging.basicConfig(
@@ -54,11 +74,15 @@ REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
 JWT_SECRET = os.getenv('JWT_SECRET', 'supersecretjwtkey_change_in_production')
 JWT_EXPIRY_HOURS = int(os.getenv('JWT_EXPIRY_HOURS', 1))
 AES_KEY_HEX = os.getenv('AES_KEY', '0123456789abcdef0123456789abcdef')
+DEVICE_SERVICE_TOKEN = os.getenv('DEVICE_SERVICE_TOKEN', 'dev-device-token-change-me')
+ALLOWED_ORIGINS_ENV = os.getenv('ALLOWED_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000,http://frontend:3000')
+ALLOWED_ORIGINS = [origin.strip() for origin in ALLOWED_ORIGINS_ENV.split(',') if origin.strip()]
 
 # Global state
 db_pool = None
 redis_client = None
 ws_manager = None
+APP_START_TIME = datetime.now(timezone.utc)
 
 
 # ============================================================================
@@ -142,6 +166,19 @@ class AttendanceRecord(BaseModel):
 class AttendanceBatch(BaseModel):
     records: List[AttendanceRecord]
 
+class AttendanceUpdateRequest(BaseModel):
+    status: Optional[str] = Field(default=None)
+    verification_method: Optional[str] = Field(default=None)
+    match_score: Optional[int] = Field(default=None)
+    timestamp: Optional[str] = Field(default=None)
+
+class ManualAttendanceRequest(BaseModel):
+    student_id: str
+    classroom_id: str
+    timestamp: str
+    device_id: Optional[str] = 'MANUAL'
+    status: Optional[str] = 'manual'
+
 class TemplateSyncAckRequest(BaseModel):
     device_id: str
     template_id: str
@@ -155,6 +192,29 @@ class GatewayHeartbeat(BaseModel):
     last_forward_at: Optional[str]
     backend_reachable: bool
     connected_devices: List[str]
+
+class CreateUserRequest(BaseModel):
+    role: str
+    full_name: str
+    email: str
+    username: str
+    password: str
+    student_number: Optional[str] = None
+    department: Optional[str] = None
+    semester: Optional[int] = None
+    employee_id: Optional[str] = None
+
+class UserCredentialResponse(BaseModel):
+    user_id: str
+    username: str
+    email: str
+    role: str
+    temporary_password: str
+    login_url: str
+    message: str
+
+class ResetPasswordRequest(BaseModel):
+    new_password: str
 
 
 # ============================================================================
@@ -263,6 +323,26 @@ def get_user_agent(request: Request) -> str:
     """Get User-Agent header."""
     return request.headers.get('user-agent', '')
 
+def require_device_token(request: Request):
+    """Validate X-Device-Token for gateway/device-facing APIs."""
+    token = request.headers.get('x-device-token')
+    if not token or token != DEVICE_SERVICE_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid device token")
+
+def invalidate_user_sessions(user_id: str):
+    """Blacklist all known active JWTs for a given user."""
+    if not redis_client:
+        return
+    try:
+        keys = redis_client.keys(f"jwt_user:{user_id}:*")
+        ttl_seconds = max(60, int(JWT_EXPIRY_HOURS * 3600))
+        for key in keys:
+            token = key.split(':', 3)[-1]
+            redis_client.setex(f"jwt_blacklist:{token}", ttl_seconds, '1')
+            redis_client.delete(key)
+    except Exception as e:
+        logger.error(f"Session invalidation error: {e}")
+
 
 # ============================================================================
 # CRYPTO UTILITIES
@@ -298,7 +378,7 @@ app = FastAPI(title="Attendance API", version="1.0.0")
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://frontend:3000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -316,6 +396,11 @@ async def startup():
         conn = db_pool.get_conn()
         cur = conn.cursor()
         cur.execute("SELECT 1")
+        cur.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS uq_device_sync_log_device_template
+               ON device_sync_log (device_id, template_id)"""
+        )
+        conn.commit()
         db_pool.put_conn(conn)
         logger.info("✓ Database connected")
     except Exception as e:
@@ -408,8 +493,115 @@ class WebSocketManager:
 
 @app.get("/api/health")
 async def health():
-    """Health check endpoint."""
-    return {"status": "ok"}
+    """Health check endpoint with service connectivity and uptime."""
+    db_connected = False
+    redis_connected = False
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            cur.execute("SELECT 1")
+            db_connected = cur.fetchone()[0] == 1
+    except Exception:
+        db_connected = False
+
+    try:
+        if redis_client:
+            redis_client.ping()
+            redis_connected = True
+    except Exception:
+        redis_connected = False
+
+    uptime_seconds = int((datetime.now(timezone.utc) - APP_START_TIME).total_seconds())
+
+    return {
+        "status": "ok" if db_connected else "degraded",
+        "db_connected": db_connected,
+        "redis_connected": redis_connected,
+        "uptime_seconds": uptime_seconds
+    }
+
+@app.get("/api/health/db")
+async def health_db():
+    """Run database verification queries for instructor health checks."""
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            cur.execute("SELECT COUNT(*) FROM users")
+            total_users = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM attendance_records")
+            total_records = cur.fetchone()[0]
+
+            cur.execute(
+                """SELECT table_name
+                   FROM information_schema.tables
+                   WHERE table_schema = 'public'
+                   ORDER BY table_name"""
+            )
+            tables = [row[0] for row in cur.fetchall()]
+
+        return {
+            "status": "ok",
+            "checks": {
+                "total_users": total_users,
+                "total_records": total_records,
+                "tables": tables
+            }
+        }
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+        return JSONResponse(status_code=503, content={"status": "error", "detail": str(e)})
+
+@app.get("/api/admin/db-status")
+async def admin_db_status(request: Request):
+    """Return detailed DB diagnostics for administrators."""
+    user = get_current_user(request)
+    if not user or user.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            cur.execute(
+                """SELECT table_name
+                   FROM information_schema.tables
+                   WHERE table_schema = 'public'
+                   ORDER BY table_name"""
+            )
+            table_names = [row[0] for row in cur.fetchall()]
+
+            table_counts = {}
+            for table_name in table_names:
+                if not table_name.replace('_', '').isalnum():
+                    continue
+                cur.execute(sql.SQL("SELECT COUNT(*) FROM {}") .format(sql.Identifier(table_name)))
+                table_counts[table_name] = cur.fetchone()[0]
+
+            cur.execute(
+                """SELECT inhrelid::regclass::text
+                   FROM pg_inherits
+                   WHERE inhparent = 'attendance_records'::regclass
+                   ORDER BY inhrelid::regclass::text"""
+            )
+            partitions = [row[0] for row in cur.fetchall()]
+
+            cur.execute("SELECT version()")
+            postgres_version = cur.fetchone()[0]
+
+        redis_ping_ms = None
+        if redis_client:
+            start = time.perf_counter()
+            redis_client.ping()
+            redis_ping_ms = round((time.perf_counter() - start) * 1000, 3)
+
+        return {
+            "status": "ok",
+            "table_counts": table_counts,
+            "attendance_partitions": partitions,
+            "redis_ping_ms": redis_ping_ms,
+            "postgres_version": postgres_version
+        }
+    except Exception as e:
+        logger.error(f"Admin DB status error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/auth/login", response_model=LoginResponse)
 async def login(request: Request, login_req: LoginRequest):
@@ -430,6 +622,7 @@ async def login(request: Request, login_req: LoginRequest):
             row = cur.fetchone()
 
         if not row:
+            log_audit(None, "login_failed", "user", login_req.username, get_user_ip(request), get_user_agent(request))
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
         user_id, username, email, password_hash, role, is_active = row
@@ -438,9 +631,12 @@ async def login(request: Request, login_req: LoginRequest):
             raise HTTPException(status_code=401, detail="User account is inactive")
 
         if not verify_password(login_req.password, password_hash):
+            log_audit(str(user_id), "login_failed", "user", str(user_id), get_user_ip(request), get_user_agent(request))
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
         token = create_jwt(str(user_id), username, role)
+        if redis_client:
+            redis_client.setex(f"jwt_user:{user_id}:{token}", int(JWT_EXPIRY_HOURS * 3600), '1')
         log_audit(str(user_id), "login", None, None, get_user_ip(request), get_user_agent(request))
 
         return LoginResponse(
@@ -474,6 +670,7 @@ async def logout(request: Request):
         remaining = max(0, int(exp_time - now))
         if remaining > 0:
             redis_client.setex(f"jwt_blacklist:{token}", remaining, '1')
+        redis_client.delete(f"jwt_user:{user['user_id']}:{token}")
     
     log_audit(user['user_id'], "logout", None, None, get_user_ip(request), get_user_agent(request))
     return {"message": "Logged out successfully"}
@@ -512,6 +709,304 @@ async def get_me(request: Request):
         raise
     except Exception as e:
         logger.error(f"Get user error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ============================================================================
+# ENDPOINTS: USER MANAGEMENT (ADMIN + SELF PROFILE)
+# ============================================================================
+
+@app.post("/api/admin/users/create", response_model=UserCredentialResponse)
+async def admin_create_user(request: Request, payload: CreateUserRequest):
+    """Create a new student or faculty user and return one-time credentials."""
+    user = get_current_user(request)
+    if not user or user.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    if payload.role not in ('student', 'faculty'):
+        raise HTTPException(status_code=400, detail="Role must be student or faculty")
+
+    if payload.role == 'student' and not payload.student_number:
+        raise HTTPException(status_code=400, detail="student_number is required for student role")
+
+    if payload.semester is not None and (payload.semester < 1 or payload.semester > 8):
+        raise HTTPException(status_code=400, detail="semester must be between 1 and 8")
+
+    frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            cur.execute("SELECT 1 FROM users WHERE username = %s", (payload.username,))
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="Username already exists")
+
+            cur.execute("SELECT 1 FROM users WHERE email = %s", (payload.email,))
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="Email already exists")
+
+            hashed = hash_password(payload.password)
+            cur.execute(
+                """INSERT INTO users (username, email, password_hash, role, is_active)
+                   VALUES (%s, %s, %s, %s, TRUE)
+                   RETURNING user_id""",
+                (payload.username, payload.email, hashed, payload.role)
+            )
+            new_user_id = cur.fetchone()[0]
+
+            if payload.role == 'student':
+                cur.execute(
+                    """INSERT INTO students
+                       (user_id, student_number, full_name, department, semester, is_active)
+                       VALUES (%s, %s, %s, %s, %s, TRUE)
+                       RETURNING student_id""",
+                    (new_user_id, payload.student_number, payload.full_name, payload.department, payload.semester)
+                )
+                _ = cur.fetchone()[0]
+
+        log_audit(user['user_id'], "create_user", "user", str(new_user_id), get_user_ip(request), get_user_agent(request))
+
+        return UserCredentialResponse(
+            user_id=str(new_user_id),
+            username=payload.username,
+            email=payload.email,
+            role=payload.role,
+            temporary_password=payload.password,
+            login_url=frontend_url,
+            message="User created successfully. Share these credentials securely."
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Admin create user error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(
+    request: Request,
+    role: Optional[str] = None,
+    is_active: Optional[bool] = None
+):
+    """List users with optional role and active-state filters."""
+    user = get_current_user(request)
+    if not user or user.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            conditions = []
+            params: List[Any] = []
+            if role in ('admin', 'faculty', 'student'):
+                conditions.append("u.role = %s")
+                params.append(role)
+            if is_active is not None:
+                conditions.append("u.is_active = %s")
+                params.append(is_active)
+
+            where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+            cur.execute(
+                f"""SELECT u.user_id, u.username, u.email, u.role, u.is_active, u.created_at,
+                           s.student_id, s.student_number, s.full_name, s.department, s.semester,
+                           s.fp_enrolled
+                    FROM users u
+                    LEFT JOIN students s ON s.user_id = u.user_id
+                    {where_clause}
+                    ORDER BY u.created_at DESC""",
+                params
+            )
+            rows = cur.fetchall()
+
+            user_ids = [str(row[0]) for row in rows if row[3] == 'faculty']
+            faculty_courses: Dict[str, List[Dict[str, str]]] = {}
+            if user_ids:
+                cur.execute(
+                    """SELECT course_id, course_code, course_name, faculty_id
+                       FROM courses
+                       WHERE faculty_id = ANY(%s::uuid[])
+                       ORDER BY course_code""",
+                    (user_ids,)
+                )
+                for c_row in cur.fetchall():
+                    fid = str(c_row[3])
+                    faculty_courses.setdefault(fid, []).append(
+                        {
+                            'course_id': str(c_row[0]),
+                            'course_code': c_row[1],
+                            'course_name': c_row[2]
+                        }
+                    )
+
+        results = []
+        for row in rows:
+            linked_info: Dict[str, Any] = {}
+            if row[3] == 'student':
+                linked_info = {
+                    'student_id': str(row[6]) if row[6] else None,
+                    'student_number': row[7],
+                    'full_name': row[8],
+                    'department': row[9],
+                    'semester': row[10],
+                    'fp_enrolled': row[11]
+                }
+            elif row[3] == 'faculty':
+                linked_info = {
+                    'employee_id': None,
+                    'courses': faculty_courses.get(str(row[0]), [])
+                }
+
+            results.append(
+                {
+                    'user_id': str(row[0]),
+                    'username': row[1],
+                    'email': row[2],
+                    'role': row[3],
+                    'is_active': row[4],
+                    'created_at': str(row[5]),
+                    'linked_info': linked_info
+                }
+            )
+
+        return results
+    except Exception as e:
+        logger.error(f"Admin list users error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.put("/api/admin/users/{user_id}/reset-password")
+async def admin_reset_password(request: Request, user_id: str, payload: ResetPasswordRequest):
+    """Reset a user's password and invalidate active sessions."""
+    user = get_current_user(request)
+    if not user or user.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    if len(payload.new_password.strip()) < 6:
+        raise HTTPException(status_code=400, detail="new_password must be at least 6 characters")
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            cur.execute("SELECT user_id FROM users WHERE user_id = %s::uuid", (user_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="User not found")
+
+            cur.execute(
+                "UPDATE users SET password_hash = %s WHERE user_id = %s::uuid",
+                (hash_password(payload.new_password), user_id)
+            )
+
+        invalidate_user_sessions(user_id)
+        log_audit(user['user_id'], "reset_password", "user", user_id, get_user_ip(request), get_user_agent(request))
+        return {'message': 'Password reset successful'}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Admin reset password error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.put("/api/admin/users/{user_id}/toggle-active")
+async def admin_toggle_active(request: Request, user_id: str):
+    """Toggle a user's active status and invalidate sessions when deactivated."""
+    user = get_current_user(request)
+    if not user or user.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    if user_id == user.get('user_id'):
+        raise HTTPException(status_code=400, detail="Cannot deactivate your own account")
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            cur.execute("SELECT is_active FROM users WHERE user_id = %s::uuid", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            new_state = not row[0]
+            cur.execute("UPDATE users SET is_active = %s WHERE user_id = %s::uuid", (new_state, user_id))
+
+        if not new_state:
+            invalidate_user_sessions(user_id)
+
+        action = "activate_user" if new_state else "deactivate_user"
+        log_audit(user['user_id'], action, "user", user_id, get_user_ip(request), get_user_agent(request))
+        return {'message': 'User status updated', 'is_active': new_state}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Admin toggle active error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/users/me/profile")
+async def get_my_profile(request: Request):
+    """Return role-aware profile details for the authenticated user."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            cur.execute(
+                """SELECT user_id, username, email, role, is_active, created_at
+                   FROM users WHERE user_id = %s::uuid""",
+                (user['user_id'],)
+            )
+            base = cur.fetchone()
+            if not base:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            response = {
+                'user_id': str(base[0]),
+                'username': base[1],
+                'email': base[2],
+                'role': base[3],
+                'is_active': base[4],
+                'created_at': str(base[5])
+            }
+
+            if base[3] == 'student':
+                cur.execute(
+                    """SELECT student_id, student_number, full_name, department, semester, fp_enrolled
+                       FROM students WHERE user_id = %s::uuid""",
+                    (user['user_id'],)
+                )
+                s_row = cur.fetchone()
+                if s_row:
+                    response.update(
+                        {
+                            'student_id': str(s_row[0]),
+                            'student_number': s_row[1],
+                            'full_name': s_row[2],
+                            'department': s_row[3],
+                            'semester': s_row[4],
+                            'fp_enrolled': s_row[5]
+                        }
+                    )
+            elif base[3] == 'faculty':
+                cur.execute(
+                    """SELECT course_id, course_code, course_name
+                       FROM courses
+                       WHERE faculty_id = %s::uuid AND is_active = TRUE
+                       ORDER BY course_code""",
+                    (user['user_id'],)
+                )
+                response['employee_id'] = None
+                response['courses'] = [
+                    {
+                        'course_id': str(row[0]),
+                        'course_code': row[1],
+                        'course_name': row[2]
+                    }
+                    for row in cur.fetchall()
+                ]
+            else:
+                response['full_name'] = base[1]
+
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get profile error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -840,35 +1335,46 @@ async def get_enrollment_status(request: Request, student_id: str):
     try:
         conn = db_pool.get_conn()
         cur = conn.cursor()
-        
+
         cur.execute(
             """SELECT s.fp_enrolled, s.fp_enrolled_at
                FROM students s WHERE s.student_id = %s""",
             (student_id,)
         )
         student_row = cur.fetchone()
-        
+        resolved_student_id = student_id
+
+        # Compatibility path: frontend may send user_id instead of student_id.
         if not student_row:
-            cur.close()
-            db_pool.put_conn(conn)
-            raise HTTPException(status_code=404, detail="Student not found")
-        
+            cur.execute(
+                """SELECT s.student_id, s.fp_enrolled, s.fp_enrolled_at
+                   FROM students s WHERE s.user_id = %s::uuid""",
+                (student_id,)
+            )
+            mapped_row = cur.fetchone()
+            if not mapped_row:
+                cur.close()
+                db_pool.put_conn(conn)
+                raise HTTPException(status_code=404, detail="Student not found")
+            resolved_student_id = str(mapped_row[0])
+            student_row = (mapped_row[1], mapped_row[2])
+
         fp_enrolled, fp_enrolled_at = student_row
-        
+
         # Get device sync status
         cur.execute(
             """SELECT dsl.device_id, dsl.sync_version, dsl.sync_status, dsl.synced_at
                FROM device_sync_log dsl
                WHERE dsl.template_id IN (SELECT template_id FROM fingerprint_templates WHERE student_id = %s)
                ORDER BY dsl.device_id""",
-            (student_id,)
+            (resolved_student_id,)
         )
         sync_rows = cur.fetchall()
         cur.close()
         db_pool.put_conn(conn)
-        
+
         return {
-            'student_id': student_id,
+            'student_id': resolved_student_id,
             'fp_enrolled': fp_enrolled,
             'enrolled_at': str(fp_enrolled_at) if fp_enrolled_at else None,
             'sync_status_per_device': [
@@ -896,17 +1402,27 @@ async def get_enrollment_status(request: Request, student_id: str):
 @app.get("/api/templates/pending-sync")
 async def get_pending_templates(request: Request):
     """Get templates pending sync to devices (gateway access)."""
+    require_device_token(request)
     try:
         conn = db_pool.get_conn()
         cur = conn.cursor()
         
         # Get templates newer than last synced version per device
         cur.execute(
-            """SELECT ft.template_id, ft.student_id, ft.sync_version, 'ESP32_CLASSROOM_101'::VARCHAR as device_id
+            """SELECT ft.template_id, ft.student_id, ft.sync_version,
+                      COALESCE(cl.device_id, 'UNASSIGNED') as device_id,
+                      ft.template_data
                FROM fingerprint_templates ft
+               LEFT JOIN students s ON s.student_id = ft.student_id
+               LEFT JOIN class_schedule cs ON cs.course_id IN (
+                   SELECT ce.course_id FROM course_enrollments ce WHERE ce.student_id = s.student_id
+               )
+               LEFT JOIN classrooms cl ON cl.classroom_id = cs.classroom_id
                WHERE ft.is_active = TRUE
                AND ft.sync_version > COALESCE(
-                   (SELECT MAX(sync_version) FROM device_sync_log WHERE template_id = ft.template_id),
+                   (SELECT MAX(sync_version)
+                      FROM device_sync_log dsl
+                     WHERE dsl.template_id = ft.template_id AND dsl.device_id = COALESCE(cl.device_id, 'UNASSIGNED')),
                    0
                )
                LIMIT 20"""
@@ -921,7 +1437,7 @@ async def get_pending_templates(request: Request):
                 'student_id': str(row[1]),
                 'sync_version': row[2],
                 'device_id': row[3],
-                'template_data': base64.b64encode(os.urandom(128)).decode()  # Placeholder
+                'template_data': base64.b64encode(row[4]).decode()
             }
             for row in rows
         ]
@@ -956,6 +1472,7 @@ async def get_device_templates(request: Request, device_id: str):
 @app.post("/api/templates/sync-ack")
 async def sync_ack(request: Request, ack: TemplateSyncAckRequest):
     """Acknowledge template sync (gateway)."""
+    require_device_token(request)
     try:
         conn = db_pool.get_conn()
         cur = conn.cursor()
@@ -963,7 +1480,8 @@ async def sync_ack(request: Request, ack: TemplateSyncAckRequest):
         cur.execute(
             """INSERT INTO device_sync_log (device_id, template_id, sync_version, sync_status, synced_at)
                VALUES (%s, %s, %s, 'synced', NOW())
-               ON CONFLICT (sync_id) DO UPDATE SET
+               ON CONFLICT (device_id, template_id) DO UPDATE SET
+                   sync_version = EXCLUDED.sync_version,
                    sync_status = 'synced',
                    synced_at = NOW()""",
             (ack.device_id, ack.template_id, ack.sync_version)
@@ -987,6 +1505,7 @@ async def sync_ack(request: Request, ack: TemplateSyncAckRequest):
 async def record_attendance(request: Request, batch: AttendanceBatch):
     """Record attendance scans from gateway (accepts batch of records)."""
     from fastapi.responses import JSONResponse
+    require_device_token(request)
 
     inserted = []
     skipped = []
@@ -1056,10 +1575,27 @@ async def record_attendance(request: Request, batch: AttendanceBatch):
 
                 # Broadcast WebSocket event
                 if ws_manager:
+                    cur.execute(
+                        """SELECT s.full_name, s.student_number, cl.room_number,
+                                  c.course_name
+                           FROM students s
+                           JOIN classrooms cl ON cl.classroom_id = %s::uuid
+                           LEFT JOIN class_schedule cs ON cs.classroom_id = cl.classroom_id
+                               AND cs.day_of_week = TRIM(TO_CHAR(%s::timestamptz, 'Day'))
+                           LEFT JOIN courses c ON c.course_id = cs.course_id
+                           WHERE s.student_id = %s::uuid
+                           LIMIT 1""",
+                        (str(classroom_uuid), record.timestamp, record.student_id)
+                    )
+                    enriched_row = cur.fetchone()
                     event = {
                         'event': 'attendance_scan',
                         'student_id': record.student_id,
+                        'student_name': enriched_row[0] if enriched_row else None,
+                        'student_number': enriched_row[1] if enriched_row else None,
                         'classroom_id': str(classroom_uuid),
+                        'room_number': enriched_row[2] if enriched_row else None,
+                        'course_name': enriched_row[3] if enriched_row else None,
                         'device_id': record.device_id,
                         'timestamp': record.timestamp
                     }
@@ -1196,8 +1732,58 @@ async def get_attendance_history(
 
 @app.get("/api/attendance/student/{student_id}")
 async def get_student_attendance(request: Request, student_id: str):
-    """Get student attendance history."""
+    """Get attendance history for a specific student."""
     user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        conn = db_pool.get_conn()
+        cur = conn.cursor()
+
+        # Students can only access their own attendance records.
+        resolved_student_id = student_id
+        if user['role'] == 'student':
+            cur.execute("SELECT student_id FROM students WHERE user_id = %s::uuid", (user['user_id'],))
+            own_student_row = cur.fetchone()
+            if not own_student_row:
+                raise HTTPException(status_code=404, detail="Student profile not found")
+            if str(own_student_row[0]) != student_id:
+                raise HTTPException(status_code=403, detail="Can only view own records")
+            resolved_student_id = str(own_student_row[0])
+
+        cur.execute(
+            """SELECT ar.record_id, ar.timestamp, ar.classroom_id, cl.room_number,
+                      ar.status, ar.verification_method, ar.match_score
+               FROM attendance_records ar
+               JOIN classrooms cl ON cl.classroom_id = ar.classroom_id
+               WHERE ar.student_id = %s::uuid
+               ORDER BY ar.timestamp DESC
+               LIMIT 100""",
+            (resolved_student_id,)
+        )
+        rows = cur.fetchall()
+        cur.close()
+        db_pool.put_conn(conn)
+
+        return [
+            {
+                'record_id': str(row[0]),
+                'timestamp': str(row[1]),
+                'classroom_id': str(row[2]),
+                'room_number': row[3],
+                'status': row[4],
+                'verification_method': row[5],
+                'match_score': row[6]
+            }
+            for row in rows
+        ]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Student attendance error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.delete("/api/attendance/{record_id}")
 async def delete_attendance_record(request: Request, record_id: str):
@@ -1234,7 +1820,7 @@ async def delete_attendance_record(request: Request, record_id: str):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.put("/api/attendance/{record_id}")
-async def update_attendance_record(request: Request, record_id: str, update_data: dict):
+async def update_attendance_record(request: Request, record_id: str, update_data: AttendanceUpdateRequest):
     """Update an attendance record (admin only)."""
     user = get_current_user(request)
     if not user or user.get('role') != 'admin':
@@ -1256,10 +1842,11 @@ async def update_attendance_record(request: Request, record_id: str, update_data
         updates = []
         params = []
         
+        payload = update_data.model_dump(exclude_none=True)
         for field in allowed_fields:
-            if field in update_data:
+            if field in payload:
                 updates.append(f"{field} = %s")
-                params.append(update_data[field])
+                params.append(payload[field])
         
         if not updates:
             raise HTTPException(status_code=400, detail="No valid fields to update")
@@ -1283,25 +1870,20 @@ async def update_attendance_record(request: Request, record_id: str, update_data
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/attendance/manual")
-async def add_manual_attendance(request: Request, attendance_data: dict):
+async def add_manual_attendance(request: Request, attendance_data: ManualAttendanceRequest):
     """Manually add an attendance record (admin/faculty only)."""
     user = get_current_user(request)
     if not user or user.get('role') not in ('admin', 'faculty'):
         raise HTTPException(status_code=403, detail="Admin or Faculty only")
     
     try:
-        # Validate required fields
-        required_fields = ['student_id', 'classroom_id', 'timestamp']
-        for field in required_fields:
-            if field not in attendance_data:
-                raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
-        
         conn = db_pool.get_conn()
         cur = conn.cursor()
+        payload = attendance_data.model_dump()
         
         # Validate student exists
         cur.execute("SELECT student_id FROM students WHERE student_id = %s AND is_active = TRUE", 
-                   (attendance_data['student_id'],))
+               (payload['student_id'],))
         if not cur.fetchone():
             cur.close()
             db_pool.put_conn(conn)
@@ -1309,7 +1891,7 @@ async def add_manual_attendance(request: Request, attendance_data: dict):
         
         # Validate classroom exists
         cur.execute("SELECT classroom_id FROM classrooms WHERE classroom_id = %s", 
-                   (attendance_data['classroom_id'],))
+               (payload['classroom_id'],))
         if not cur.fetchone():
             cur.close()
             db_pool.put_conn(conn)
@@ -1322,11 +1904,11 @@ async def add_manual_attendance(request: Request, attendance_data: dict):
                VALUES (%s, %s, %s, %s, %s, %s, %s)
                RETURNING record_id""",
             (
-                attendance_data['student_id'],
-                attendance_data['classroom_id'],
-                attendance_data.get('device_id', 'MANUAL'),
-                attendance_data['timestamp'],
-                attendance_data.get('status', 'manual'),
+                payload['student_id'],
+                payload['classroom_id'],
+                payload.get('device_id', 'MANUAL'),
+                payload['timestamp'],
+                payload.get('status', 'manual'),
                 'manual',
                 None
             )
@@ -1345,43 +1927,6 @@ async def add_manual_attendance(request: Request, attendance_data: dict):
         raise
     except Exception as e:
         logger.error(f"Add manual attendance error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-    if not user:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    # Role-based access control
-    if user['role'] == 'student' and user['user_id'] != student_id:
-        raise HTTPException(status_code=403, detail="Can only view own records")
-    
-    try:
-        conn = db_pool.get_conn()
-        cur = conn.cursor()
-        
-        cur.execute(
-            """SELECT ar.record_id, ar.timestamp, ar.classroom_id, ar.status
-               FROM attendance_records ar
-               WHERE ar.student_id = %s
-               ORDER BY ar.timestamp DESC
-               LIMIT 100""",
-            (student_id,)
-        )
-        rows = cur.fetchall()
-        cur.close()
-        db_pool.put_conn(conn)
-        
-        return [
-            {
-                'record_id': str(row[0]),
-                'timestamp': str(row[1]),
-                'classroom_id': str(row[2]),
-                'status': row[3]
-            }
-            for row in rows
-        ]
-    
-    except Exception as e:
-        logger.error(f"Student attendance error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/attendance/course/{course_id}")
@@ -1487,20 +2032,62 @@ async def get_student_report(request: Request, student_id: str):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    return {
-        'student_id': student_id,
-        'courses': [
-            {
-                'course_id': 'crs_001',
-                'course_name': 'Software Engineering',
-                'present': 20,
-                'total': 30,
-                'attendance_pct': 66.7,
-                'status_chip': 'amber'
-            }
-        ]
-    }
+
+    if user.get('role') == 'student':
+        try:
+            with db_pool.get_cursor() as (_, cur):
+                cur.execute("SELECT student_id FROM students WHERE user_id = %s::uuid", (user['user_id'],))
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Student profile not found")
+                if str(row[0]) != student_id:
+                    raise HTTPException(status_code=403, detail="Can only view own report")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Student report access check error: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            cur.execute(
+                """SELECT c.course_id, c.course_name,
+                          COALESCE(COUNT(ar.record_id) FILTER (WHERE ar.status = 'present'), 0) AS present,
+                          COALESCE(COUNT(ar.record_id), 0) AS total
+                   FROM course_enrollments ce
+                   JOIN courses c ON c.course_id = ce.course_id
+                   LEFT JOIN class_schedule cs ON cs.course_id = c.course_id
+                   LEFT JOIN attendance_records ar
+                       ON ar.student_id = ce.student_id
+                      AND ar.classroom_id = cs.classroom_id
+                   WHERE ce.student_id = %s::uuid
+                   GROUP BY c.course_id, c.course_name
+                   ORDER BY c.course_name""",
+                (student_id,)
+            )
+            rows = cur.fetchall()
+
+        courses = []
+        for row in rows:
+            total = row[3]
+            pct = round((row[2] / total) * 100, 2) if total > 0 else 0.0
+            courses.append(
+                {
+                    'course_id': str(row[0]),
+                    'course_name': row[1],
+                    'present': row[2],
+                    'total': total,
+                    'attendance_pct': pct,
+                    'status_chip': 'success' if pct >= 75 else 'warning' if pct >= 50 else 'error'
+                }
+            )
+
+        return {'student_id': student_id, 'courses': courses}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Student report error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/reports/course/{course_id}")
 async def get_course_report(request: Request, course_id: str):
@@ -1508,15 +2095,85 @@ async def get_course_report(request: Request, course_id: str):
     user = get_current_user(request)
     if not user or user['role'] not in ('faculty', 'admin'):
         raise HTTPException(status_code=403, detail="Faculty/Admin only")
-    
-    return {
-        'course_id': course_id,
-        'course_name': 'Software Engineering',
-        'total_enrolled': 30,
-        'total_records': 500,
-        'attendance_pct': 75,
-        'at_risk_students': []
-    }
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            cur.execute(
+                """SELECT c.course_id, c.course_name, c.faculty_id
+                   FROM courses c
+                   WHERE c.course_id = %s::uuid AND c.is_active = TRUE""",
+                (course_id,)
+            )
+            course_row = cur.fetchone()
+            if not course_row:
+                raise HTTPException(status_code=404, detail="Course not found")
+
+            if user['role'] == 'faculty' and str(course_row[2]) != user['user_id']:
+                raise HTTPException(status_code=403, detail="Can only view own course")
+
+            cur.execute(
+                """SELECT COUNT(*)
+                   FROM course_enrollments
+                   WHERE course_id = %s::uuid""",
+                (course_id,)
+            )
+            total_enrolled = cur.fetchone()[0]
+
+            cur.execute(
+                """SELECT COUNT(*) FILTER (WHERE ar.status = 'present') AS present_count,
+                          COUNT(ar.record_id) AS total_count
+                   FROM class_schedule cs
+                   LEFT JOIN attendance_records ar ON ar.classroom_id = cs.classroom_id
+                   WHERE cs.course_id = %s::uuid""",
+                (course_id,)
+            )
+            present_count, total_records = cur.fetchone()
+            attendance_pct = round((present_count / total_records) * 100, 2) if total_records > 0 else 0.0
+
+            cur.execute(
+                """SELECT s.student_id, s.full_name, s.student_number,
+                          COALESCE(COUNT(ar.record_id) FILTER (WHERE ar.status = 'present'), 0) AS present_count,
+                          COALESCE(COUNT(ar.record_id), 0) AS total_count
+                   FROM course_enrollments ce
+                   JOIN students s ON s.student_id = ce.student_id
+                   LEFT JOIN class_schedule cs ON cs.course_id = ce.course_id
+                   LEFT JOIN attendance_records ar
+                       ON ar.student_id = ce.student_id
+                      AND ar.classroom_id = cs.classroom_id
+                   WHERE ce.course_id = %s::uuid
+                   GROUP BY s.student_id, s.full_name, s.student_number
+                   ORDER BY s.full_name""",
+                (course_id,)
+            )
+            at_risk_rows = cur.fetchall()
+
+        at_risk_students = []
+        for row in at_risk_rows:
+            total = row[4]
+            pct = round((row[3] / total) * 100, 2) if total > 0 else 0.0
+            if pct < 75:
+                at_risk_students.append(
+                    {
+                        'student_id': str(row[0]),
+                        'full_name': row[1],
+                        'student_number': row[2],
+                        'attendance_pct': pct
+                    }
+                )
+
+        return {
+            'course_id': str(course_row[0]),
+            'course_name': course_row[1],
+            'total_enrolled': total_enrolled,
+            'total_records': total_records,
+            'attendance_pct': attendance_pct,
+            'at_risk_students': at_risk_students
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Course report error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/reports/system")
 async def get_system_report(request: Request):
@@ -1524,15 +2181,62 @@ async def get_system_report(request: Request):
     user = get_current_user(request)
     if not user or user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Admin only")
-    
-    return {
-        'total_students': 100,
-        'total_courses': 10,
-        'total_scans_all_time': 5000,
-        'avg_attendance_pct': 78.5,
-        'devices_online': 5,
-        'top_courses': []
-    }
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            cur.execute("SELECT COUNT(*) FROM students WHERE is_active = TRUE")
+            total_students = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM courses WHERE is_active = TRUE")
+            total_courses = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM attendance_records")
+            total_scans_all_time = cur.fetchone()[0]
+
+            cur.execute(
+                """SELECT
+                       COUNT(*) FILTER (WHERE status = 'present')::float,
+                       COUNT(*)::float
+                   FROM attendance_records"""
+            )
+            present_count, total_count = cur.fetchone()
+            avg_attendance_pct = round((present_count / total_count) * 100, 2) if total_count > 0 else 0.0
+
+            cur.execute(
+                """SELECT c.course_id, c.course_name, COUNT(ar.record_id) AS scans
+                   FROM courses c
+                   LEFT JOIN class_schedule cs ON cs.course_id = c.course_id
+                   LEFT JOIN attendance_records ar ON ar.classroom_id = cs.classroom_id
+                   WHERE c.is_active = TRUE
+                   GROUP BY c.course_id, c.course_name
+                   ORDER BY scans DESC
+                   LIMIT 5"""
+            )
+            top_rows = cur.fetchall()
+
+        devices_online = 0
+        if redis_client:
+            for key in redis_client.keys("gateway:*:health"):
+                payload = redis_client.get(key)
+                if not payload:
+                    continue
+                heartbeat = json.loads(payload)
+                devices_online += len(heartbeat.get('connected_devices', []))
+
+        return {
+            'total_students': total_students,
+            'total_courses': total_courses,
+            'total_scans_all_time': total_scans_all_time,
+            'avg_attendance_pct': avg_attendance_pct,
+            'devices_online': devices_online,
+            'top_courses': [
+                {'course_id': str(row[0]), 'course_name': row[1], 'scans': row[2]}
+                for row in top_rows
+            ]
+        }
+    except Exception as e:
+        logger.error(f"System report error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/reports/export/csv/{course_id}")
 async def export_attendance_csv(request: Request, course_id: str):
@@ -1540,15 +2244,52 @@ async def export_attendance_csv(request: Request, course_id: str):
     user = get_current_user(request)
     if not user or user['role'] not in ('faculty', 'admin'):
         raise HTTPException(status_code=403, detail="Faculty/Admin only")
-    
-    csv_data = "Student,StudentNumber,Date,Timestamp,Status\n"
-    csv_data += "Alice Rahman,STU001,2025-03-01,09:05:32,Present\n"
-    
-    return StreamingResponse(
-        iter([csv_data]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=attendance_{course_id}.csv"}
-    )
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            cur.execute("SELECT course_name, faculty_id FROM courses WHERE course_id = %s::uuid", (course_id,))
+            course_row = cur.fetchone()
+            if not course_row:
+                raise HTTPException(status_code=404, detail="Course not found")
+
+            if user['role'] == 'faculty' and str(course_row[1]) != user['user_id']:
+                raise HTTPException(status_code=403, detail="Can only export own course")
+
+            cur.execute(
+                """SELECT s.full_name, s.student_number,
+                          DATE(ar.timestamp) AS class_date,
+                          ar.timestamp,
+                          ar.status
+                   FROM course_enrollments ce
+                   JOIN students s ON s.student_id = ce.student_id
+                   LEFT JOIN class_schedule cs ON cs.course_id = ce.course_id
+                   LEFT JOIN attendance_records ar
+                       ON ar.student_id = ce.student_id
+                      AND ar.classroom_id = cs.classroom_id
+                   WHERE ce.course_id = %s::uuid
+                   ORDER BY s.full_name, ar.timestamp DESC NULLS LAST""",
+                (course_id,)
+            )
+            rows = cur.fetchall()
+
+        csv_lines = ["Student,StudentNumber,Date,Timestamp,Status"]
+        for row in rows:
+            class_date = str(row[2]) if row[2] else ''
+            ts = str(row[3]) if row[3] else ''
+            status = row[4] if row[4] else 'absent'
+            csv_lines.append(f"{row[0]},{row[1]},{class_date},{ts},{status}")
+
+        csv_data = "\n".join(csv_lines) + "\n"
+        return StreamingResponse(
+            iter([csv_data]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=attendance_{course_id}.csv"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"CSV export error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============================================================================
@@ -1561,21 +2302,58 @@ async def list_devices(request: Request):
     user = get_current_user(request)
     if not user or user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Admin only")
-    
-    return [
-        {
-            'device_id': 'ESP32_CLASSROOM_101',
-            'classroom': 'room_101',
-            'last_seen': '2025-03-01T15:30:00Z',
-            'battery_pct': 87,
-            'firmware_version': '1.2.3',
-            'status': 'online'
-        }
-    ]
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            cur.execute(
+                """SELECT classroom_id, room_number, building, device_id
+                   FROM classrooms
+                   WHERE device_id IS NOT NULL
+                   ORDER BY room_number"""
+            )
+            classroom_rows = cur.fetchall()
+
+        heartbeat_by_device = {}
+        if redis_client:
+            for key in redis_client.keys("gateway:*:health"):
+                raw = redis_client.get(key)
+                if not raw:
+                    continue
+                hb = json.loads(raw)
+                for device_id in hb.get('connected_devices', []):
+                    heartbeat_by_device[device_id] = {
+                        'gateway_id': hb.get('gateway_id'),
+                        'last_seen': hb.get('last_forward_at'),
+                        'backend_reachable': hb.get('backend_reachable', False),
+                        'queue_depth': hb.get('queue_depth', 0),
+                    }
+
+        results = []
+        for row in classroom_rows:
+            heartbeat = heartbeat_by_device.get(row[3], {})
+            results.append(
+                {
+                    'classroom_id': str(row[0]),
+                    'device_id': row[3],
+                    'classroom': row[1],
+                    'building': row[2],
+                    'last_seen': heartbeat.get('last_seen'),
+                    'status': 'online' if heartbeat else 'offline',
+                    'gateway_id': heartbeat.get('gateway_id'),
+                    'backend_reachable': heartbeat.get('backend_reachable', False),
+                    'queue_depth': heartbeat.get('queue_depth', 0),
+                }
+            )
+
+        return results
+    except Exception as e:
+        logger.error(f"List devices error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/gateway/heartbeat")
 async def gateway_heartbeat(request: Request, heartbeat: GatewayHeartbeat):
     """Receive gateway heartbeat."""
+    require_device_token(request)
     # Update Redis cache for gateway status
     if redis_client:
         redis_client.setex(f"gateway:{heartbeat.gateway_id}:health", 120, json.dumps(heartbeat.dict()))
