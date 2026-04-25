@@ -247,7 +247,7 @@ def thread_cloud_forwarder():
             
             # Forward to backend
             headers = {
-                'Authorization': f'Bearer {DEVICE_SERVICE_TOKEN}',
+                'x-device-token': DEVICE_SERVICE_TOKEN,
                 'Content-Type': 'application/json'
             }
             
@@ -348,7 +348,7 @@ def thread_template_sync_poller():
             time.sleep(SYNC_POLL_INTERVAL)
             
             # Poll for pending templates
-            headers = {'Authorization': f'Bearer {DEVICE_SERVICE_TOKEN}'}
+            headers = {'x-device-token': DEVICE_SERVICE_TOKEN}
             resp = requests.get(
                 f"{BACKEND_URL}/api/templates/pending-sync",
                 headers=headers,
@@ -396,7 +396,7 @@ def thread_template_sync_poller():
                     
                     if pending_acks[ack_key].wait(timeout=10):
                         # ACK received, mark as synced
-                        headers = {'Authorization': f'Bearer {DEVICE_SERVICE_TOKEN}'}
+                        headers = {'x-device-token': DEVICE_SERVICE_TOKEN}
                         ack_payload = {
                             'device_id': device_id,
                             'template_id': template_id,
@@ -459,7 +459,7 @@ def thread_health_monitor():
             mqtt_client.publish(topic, json.dumps(health_report))
             
             # Call heartbeat API
-            headers = {'Authorization': f'Bearer {DEVICE_SERVICE_TOKEN}'}
+            headers = {'x-device-token': DEVICE_SERVICE_TOKEN}
             resp = requests.post(
                 f"{BACKEND_URL}/api/gateway/heartbeat",
                 json=health_report,

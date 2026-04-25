@@ -16,6 +16,8 @@ import os
 import sys
 import json
 import time
+import csv
+import io
 import logging
 import psycopg2
 from psycopg2 import pool
@@ -29,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Any, Set
 from functools import wraps
 
-from fastapi import FastAPI, HTTPException, Request, Depends, WebSocket, Query, Body
+from fastapi import FastAPI, HTTPException, Request, Depends, WebSocket, Query, Body, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
@@ -328,6 +330,50 @@ def require_device_token(request: Request):
     token = request.headers.get('x-device-token')
     if not token or token != DEVICE_SERVICE_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid device token")
+
+
+def normalize_csv_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
+
+
+def parse_bool_csv_value(value: Optional[str], default: bool = True) -> bool:
+    normalized = normalize_csv_value(value)
+    if normalized is None:
+        return default
+    return normalized.lower() in ('1', 'true', 'yes', 'y', 'active', 'enabled')
+
+
+def resolve_faculty_id_from_csv(cur, raw_row: Dict[str, Any]) -> Optional[str]:
+    faculty_id = normalize_csv_value(raw_row.get('faculty_id'))
+    faculty_username = normalize_csv_value(raw_row.get('faculty_username'))
+    faculty_email = normalize_csv_value(raw_row.get('faculty_email'))
+
+    if faculty_id:
+        try:
+            from uuid import UUID
+            UUID(faculty_id)
+            cur.execute("SELECT user_id FROM users WHERE user_id = %s::uuid AND role = 'faculty'", (faculty_id,))
+            row = cur.fetchone()
+            return str(row[0]) if row else None
+        except Exception:
+            return None
+
+    if faculty_username:
+        cur.execute("SELECT user_id FROM users WHERE username = %s AND role = 'faculty'", (faculty_username,))
+        row = cur.fetchone()
+        if row:
+            return str(row[0])
+
+    if faculty_email:
+        cur.execute("SELECT user_id FROM users WHERE email = %s AND role = 'faculty'", (faculty_email,))
+        row = cur.fetchone()
+        if row:
+            return str(row[0])
+
+    return None
 
 def invalidate_user_sessions(user_id: str):
     """Blacklist all known active JWTs for a given user."""
@@ -1192,6 +1238,175 @@ async def delete_student(request: Request, student_id: str):
     
     except Exception as e:
         logger.error(f"Delete student error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ============================================================================
+# ENDPOINTS: COURSES (ADMIN ONLY)
+# ============================================================================
+
+@app.get("/api/admin/courses")
+async def admin_list_courses(request: Request, semester: Optional[str] = None, query: Optional[str] = None):
+    """List courses for admin management with optional filtering."""
+    user = get_current_user(request)
+    if not user or user.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            conditions = ["1=1"]
+            params: List[Any] = []
+
+            if semester:
+                conditions.append("c.semester = %s")
+                params.append(semester)
+
+            if query:
+                conditions.append("(c.course_code ILIKE %s OR c.course_name ILIKE %s)")
+                params.extend([f"%{query}%", f"%{query}%"])
+
+            cur.execute(
+                f"""SELECT c.course_id, c.course_code, c.course_name, c.semester,
+                          c.faculty_id, c.is_active, u.username, u.email
+                   FROM courses c
+                   LEFT JOIN users u ON u.user_id = c.faculty_id
+                   WHERE {' AND '.join(conditions)}
+                   ORDER BY c.semester NULLS LAST, c.course_code""",
+                params,
+            )
+            rows = cur.fetchall()
+
+        return [
+            {
+                'course_id': str(row[0]),
+                'course_code': row[1],
+                'course_name': row[2],
+                'semester': row[3],
+                'faculty_id': str(row[4]) if row[4] else None,
+                'faculty_username': row[6],
+                'faculty_email': row[7],
+                'is_active': row[5],
+            }
+            for row in rows
+        ]
+    except Exception as e:
+        logger.error(f"List courses error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/admin/courses/import-csv")
+async def import_courses_csv(request: Request, file: UploadFile = File(...)):
+    """Import or update courses from CSV using course_code as the upsert key."""
+    user = get_current_user(request)
+    if not user or user.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    if not file.filename.lower().endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported")
+
+    try:
+        contents = await file.read()
+        text = contents.decode('utf-8-sig')
+        reader = csv.DictReader(io.StringIO(text))
+
+        if not reader.fieldnames:
+            raise HTTPException(status_code=400, detail="CSV file is missing a header row")
+
+        required_columns = {'course_code', 'course_name'}
+        normalized_headers = {name.strip().lower() for name in reader.fieldnames if name}
+        missing_columns = required_columns - normalized_headers
+        if missing_columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing required CSV columns: {', '.join(sorted(missing_columns))}"
+            )
+
+        created = 0
+        updated = 0
+        skipped = 0
+        row_errors = []
+
+        conn = db_pool.get_conn()
+        cur = conn.cursor()
+
+        try:
+            for row_number, raw_row in enumerate(reader, start=2):
+                row = {str(key).strip().lower(): normalize_csv_value(value) for key, value in raw_row.items()}
+                course_code = row.get('course_code')
+                course_name = row.get('course_name')
+
+                if not course_code or not course_name:
+                    skipped += 1
+                    row_errors.append({
+                        'row': row_number,
+                        'error': 'course_code and course_name are required'
+                    })
+                    continue
+
+                semester_value = normalize_csv_value(row.get('semester'))
+                faculty_id = resolve_faculty_id_from_csv(cur, row)
+                is_active = parse_bool_csv_value(row.get('is_active'), default=True)
+
+                cur.execute(
+                    "SELECT course_id, course_name, semester, faculty_id, is_active FROM courses WHERE course_code = %s",
+                    (course_code,)
+                )
+                existing = cur.fetchone()
+
+                if existing:
+                    cur.execute(
+                        """UPDATE courses
+                           SET course_name = %s,
+                               semester = %s,
+                               faculty_id = %s,
+                               is_active = %s
+                           WHERE course_code = %s
+                           RETURNING course_id""",
+                        (
+                            course_name,
+                            semester_value if semester_value is not None else existing[2],
+                            faculty_id if faculty_id is not None else existing[3],
+                            is_active,
+                            course_code,
+                        )
+                    )
+                    cur.fetchone()
+                    updated += 1
+                else:
+                    cur.execute(
+                        """INSERT INTO courses (course_code, course_name, semester, faculty_id, is_active)
+                           VALUES (%s, %s, %s, %s, %s)
+                           RETURNING course_id""",
+                        (course_code, course_name, semester_value, faculty_id, is_active)
+                    )
+                    cur.fetchone()
+                    created += 1
+
+            conn.commit()
+
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            db_pool.put_conn(conn)
+
+        log_audit(user['user_id'], "import_courses_csv", "course", None, get_user_ip(request), get_user_agent(request))
+
+        return {
+            'message': 'Courses imported successfully',
+            'summary': {
+                'created': created,
+                'updated': updated,
+                'skipped': skipped,
+                'errors': row_errors[:20]
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Import courses error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

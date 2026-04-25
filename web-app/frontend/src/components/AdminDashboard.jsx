@@ -16,6 +16,7 @@ import {
   Alert,
   Chip,
   CircularProgress,
+  Snackbar,
   TextField,
   Dialog,
   DialogTitle,
@@ -49,6 +50,14 @@ function AdminDashboard() {
   const [students, setStudents] = useState([])
   const [devices, setDevices] = useState([])
   const [stats, setStats] = useState(null)
+  const [courses, setCourses] = useState([])
+  const [coursesLoading, setCoursesLoading] = useState(false)
+  const [courseSemesterFilter, setCourseSemesterFilter] = useState('all')
+  const [courseSearch, setCourseSearch] = useState('')
+  const [courseCsvFile, setCourseCsvFile] = useState(null)
+  const [courseDragActive, setCourseDragActive] = useState(false)
+  const [courseImportResult, setCourseImportResult] = useState(null)
+  const [courseImportToast, setCourseImportToast] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
@@ -91,6 +100,12 @@ function AdminDashboard() {
     return () => ws.close()
   }, [])
 
+  useEffect(() => {
+    if (tabIndex === 4) {
+      loadCourses()
+    }
+  }, [tabIndex, courseSemesterFilter, courseSearch])
+
   const loadData = async () => {
     setLoading(true)
     setError('')
@@ -103,10 +118,26 @@ function AdminDashboard() {
       setStudents(studentsRes.data || [])
       setDevices(devicesRes.data || [])
       setStats(statsRes.data || {})
+      await loadCourses()
     } catch (err) {
       setError('Failed to load admin data')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadCourses = async () => {
+    setCoursesLoading(true)
+    try {
+      const params = new URLSearchParams()
+      if (courseSemesterFilter !== 'all') params.append('semester', courseSemesterFilter)
+      if (courseSearch.trim()) params.append('query', courseSearch.trim())
+      const res = await api.get(`/admin/courses${params.toString() ? `?${params.toString()}` : ''}`)
+      setCourses(res.data || [])
+    } catch {
+      setError('Failed to load courses')
+    } finally {
+      setCoursesLoading(false)
     }
   }
 
@@ -181,6 +212,68 @@ function AdminDashboard() {
     }
   }
 
+  const handleCourseCsvUpload = async () => {
+    if (!courseCsvFile) {
+      setError('Please choose a CSV file first')
+      return
+    }
+
+    try {
+      const formData = new FormData()
+      formData.append('file', courseCsvFile)
+
+      const res = await api.post('/admin/courses/import-csv', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      })
+
+      setCourseImportResult(res.data?.summary || null)
+      setSuccess(res.data?.message || 'Courses imported successfully')
+      setCourseImportToast(true)
+      setCourseCsvFile(null)
+      await loadCourses()
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to import courses')
+    }
+  }
+
+  const handleCourseFileSelect = (file) => {
+    if (!file) return
+    if (!file.name.toLowerCase().endsWith('.csv')) {
+      setError('Please upload a CSV file')
+      return
+    }
+    setError('')
+    setCourseCsvFile(file)
+  }
+
+  const handleCourseDrop = (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    setCourseDragActive(false)
+
+    const file = event.dataTransfer.files?.[0]
+    handleCourseFileSelect(file)
+  }
+
+  const handleDownloadCourseTemplate = () => {
+    const templateCsv = [
+      'course_code,course_name,semester,faculty_username,is_active',
+      'SE101,Software Engineering,2024-Spring,faculty1,true',
+      'DB101,Database Design,2024-Spring,faculty1,true',
+      'AI101,Artificial Intelligence,2024-Spring,faculty2,true'
+    ].join('\n')
+
+    const blob = new Blob([templateCsv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'course_import_template.csv'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+  }
+
   const enrolledCount = useMemo(() => students.filter((s) => s.fp_enrolled).length, [students])
 
   if (loading || !stats) {
@@ -206,6 +299,7 @@ function AdminDashboard() {
         <Tab label="Enrollment" />
         <Tab label="Attendance" />
         <Tab label="Devices" />
+        <Tab label="Courses" />
       </Tabs>
 
       <TabPanel value={tabIndex} index={0}>
@@ -381,6 +475,196 @@ function AdminDashboard() {
               </TableBody>
             </Table>
           </TableContainer>
+        </Paper>
+      </TabPanel>
+
+      <TabPanel value={tabIndex} index={4}>
+        <Paper sx={{ p: 2, mb: 2 }}>
+          <Typography variant="h6" sx={{ mb: 0.5 }}>Course Import & Update</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Upload a CSV to create or update courses by <strong>course_code</strong>. Rows with an existing course code will be updated.
+          </Typography>
+
+          <Box
+            onDragEnter={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              setCourseDragActive(true)
+            }}
+            onDragOver={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              setCourseDragActive(true)
+            }}
+            onDragLeave={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              setCourseDragActive(false)
+            }}
+            onDrop={handleCourseDrop}
+            sx={{
+              p: 3,
+              borderRadius: 2,
+              border: '1.5px dashed',
+              borderColor: courseDragActive ? 'primary.main' : 'divider',
+              bgcolor: courseDragActive ? 'rgba(245,78,0,0.06)' : 'background.default',
+              transition: 'all 150ms ease'
+            }}
+          >
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'center' }}>
+              <Button variant="outlined" component="label">
+                Choose CSV
+                <input
+                  hidden
+                  type="file"
+                  accept=".csv,text/csv"
+                  onChange={(e) => handleCourseFileSelect(e.target.files?.[0] || null)}
+                />
+              </Button>
+
+              <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
+                {courseCsvFile ? courseCsvFile.name : 'Drag and drop a CSV here or choose a file'}
+              </Typography>
+
+              <Button variant="contained" onClick={handleCourseCsvUpload} disabled={!courseCsvFile}>
+                Upload & Update
+              </Button>
+
+              <Button variant="text" onClick={handleDownloadCourseTemplate}>
+                Download Template
+              </Button>
+            </Stack>
+          </Box>
+
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
+            Expected columns: course_code, course_name, semester, faculty_id or faculty_username or faculty_email, is_active
+          </Typography>
+
+          <Box
+            sx={{
+              mt: 2,
+              p: 2,
+              borderRadius: 2,
+              bgcolor: 'background.default',
+              border: '1px solid',
+              borderColor: 'divider'
+            }}
+          >
+            <Typography variant="body2" sx={{ mb: 1 }}>
+              Example CSV rows:
+            </Typography>
+            <Typography component="pre" variant="body2" sx={{ m: 0, whiteSpace: 'pre-wrap' }}>
+{`course_code,course_name,semester,faculty_username,is_active
+SE101,Software Engineering,2024-Spring,faculty1,true
+DB101,Database Design,2024-Spring,faculty1,true
+AI101,Artificial Intelligence,2024-Spring,faculty2,true`}
+            </Typography>
+          </Box>
+
+          {courseImportResult ? (
+            <Card sx={{ mt: 2, bgcolor: 'background.paper' }}>
+              <CardContent>
+                <Typography variant="h6" sx={{ mb: 1 }}>Last Import Summary</Typography>
+                <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
+                  <Chip label={`Created: ${courseImportResult.created || 0}`} color="success" />
+                  <Chip label={`Updated: ${courseImportResult.updated || 0}`} color="primary" />
+                  <Chip label={`Skipped: ${courseImportResult.skipped || 0}`} color="default" />
+                </Stack>
+                {(courseImportResult.errors || []).length > 0 ? (
+                  <Box sx={{ mt: 2 }}>
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                      Row errors:
+                    </Typography>
+                    <TableContainer>
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>Row</TableCell>
+                            <TableCell>Error</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {courseImportResult.errors.map((item, index) => (
+                            <TableRow key={`${item.row}-${index}`}>
+                              <TableCell>{item.row}</TableCell>
+                              <TableCell>{item.error}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+                  </Box>
+                ) : null}
+              </CardContent>
+            </Card>
+          ) : null}
+        </Paper>
+
+        <Snackbar
+          open={courseImportToast}
+          autoHideDuration={3000}
+          onClose={() => setCourseImportToast(false)}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        >
+          <Alert onClose={() => setCourseImportToast(false)} severity="success" variant="filled" sx={{ width: '100%' }}>
+            Course CSV imported successfully.
+          </Alert>
+        </Snackbar>
+
+        <Paper sx={{ p: 2 }}>
+          <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} sx={{ mb: 2 }}>
+            <TextField
+              label="Filter by semester"
+              size="small"
+              value={courseSemesterFilter}
+              onChange={(e) => setCourseSemesterFilter(e.target.value)}
+              helperText="Use all, 1, 2, 3..."
+            />
+            <TextField
+              label="Search courses"
+              size="small"
+              value={courseSearch}
+              onChange={(e) => setCourseSearch(e.target.value)}
+              helperText="Search by course code or name"
+            />
+            <Button variant="outlined" onClick={loadCourses}>
+              Refresh
+            </Button>
+          </Stack>
+
+          <Typography variant="h6" sx={{ mb: 1.5 }}>Courses</Typography>
+          {coursesLoading ? <CircularProgress /> : (
+            <TableContainer>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Code</TableCell>
+                    <TableCell>Name</TableCell>
+                    <TableCell>Semester</TableCell>
+                    <TableCell>Faculty</TableCell>
+                    <TableCell>Status</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {courses.map((course) => (
+                    <TableRow key={course.course_id}>
+                      <TableCell>{course.course_code}</TableCell>
+                      <TableCell>{course.course_name}</TableCell>
+                      <TableCell>{course.semester || '-'}</TableCell>
+                      <TableCell>{course.faculty_username || course.faculty_email || '-'}</TableCell>
+                      <TableCell>
+                        <Chip
+                          size="small"
+                          label={course.is_active ? 'Active' : 'Inactive'}
+                          color={course.is_active ? 'success' : 'default'}
+                        />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          )}
         </Paper>
       </TabPanel>
 
