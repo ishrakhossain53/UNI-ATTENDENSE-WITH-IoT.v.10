@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Paper, TextField, Button, Box, Typography, Alert,
-  CircularProgress, Container
+  CircularProgress, Container, Stack
 } from '@mui/material'
 import api from '../api.jsx'
 import { useAuthStore } from '../store.jsx'
@@ -61,64 +61,97 @@ function Login() {
   }
   
   return (
-    <Container maxWidth="sm" sx={{ mt: 8 }}>
-      <Paper elevation={3} sx={{ p: 4 }}>
-        <Typography variant="h4" sx={{ mb: 4, textAlign: 'center' }}>
-          Attendance System Login
-        </Typography>
+    <Container maxWidth="md" sx={{ mt: { xs: 2, md: 6 } }}>
+      <Paper sx={{ p: { xs: 3, md: 5 }, borderRadius: 2 }}>
+        <Stack direction={{ xs: 'column', md: 'row' }} spacing={4} alignItems="stretch">
+          <Box sx={{ flex: 1 }}>
+            <Typography variant="h4" sx={{ mb: 1.5 }}>
+              Welcome Back
+            </Typography>
+            <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
+              Sign in to access live attendance streams, enrollment controls, and reports.
+            </Typography>
 
-        {healthChecking && (
-          <Alert severity="info" sx={{ mb: 2 }}>
-            Checking system status...
-          </Alert>
-        )}
+            {healthChecking && (
+              <Alert severity="info" sx={{ mb: 2 }}>
+                Checking system status...
+              </Alert>
+            )}
 
-        {!healthChecking && dbUnavailable && (
-          <Alert severity="error" sx={{ mb: 2 }}>
-            Database unavailable. Contact administrator.
-          </Alert>
-        )}
-        
-        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-        
-        <form onSubmit={handleSubmit}>
-          <TextField
-            fullWidth
-            label="Username"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            margin="normal"
-            disabled={loading}
-            autoFocus
-          />
-          
-          <TextField
-            fullWidth
-            label="Password"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            margin="normal"
-            disabled={loading}
-          />
-          
-          <Button
-            fullWidth
-            variant="contained"
-            sx={{ mt: 3 }}
-            disabled={loading || healthChecking || dbUnavailable || !username || !password}
-            onClick={handleSubmit}
+            {!healthChecking && dbUnavailable && (
+              <Alert severity="error" sx={{ mb: 2 }}>
+                Database unavailable. Contact administrator.
+              </Alert>
+            )}
+
+            {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+
+            <form onSubmit={handleSubmit}>
+              <TextField
+                fullWidth
+                label="Username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                margin="normal"
+                disabled={loading}
+                autoFocus
+              />
+
+              <TextField
+                fullWidth
+                label="Password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                margin="normal"
+                disabled={loading}
+              />
+
+              <Button
+                fullWidth
+                variant="contained"
+                sx={{
+                  mt: 3,
+                  py: 1.2,
+                  bgcolor: 'primary.main',
+                  '&:hover': { bgcolor: '#cf2d56' }
+                }}
+                disabled={loading || healthChecking || dbUnavailable || !username || !password}
+                onClick={handleSubmit}
+              >
+                {loading ? <CircularProgress size={24} color="inherit" /> : 'Login'}
+              </Button>
+            </form>
+          </Box>
+
+          <Box
+            sx={{
+              flex: 1,
+              p: 3,
+              borderRadius: 2,
+              bgcolor: 'background.default',
+              border: '1px solid',
+              borderColor: 'divider'
+            }}
           >
-            {loading ? <CircularProgress size={24} /> : 'Login'}
-          </Button>
-        </form>
-        
-        <Typography variant="body2" sx={{ mt: 3, color: 'text.secondary' }}>
-          Demo Credentials:
-          <br />Admin: admin / admin123
-          <br />Faculty: faculty1 / pass123
-          <br />Student: student01 / pass123
-        </Typography>
+            <Typography variant="h6" sx={{ mb: 1.5 }}>
+              Demo Credentials
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Admin: admin / admin123
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Faculty: faculty1 / pass123
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Student: student01 / pass123
+            </Typography>
+
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 3 }}>
+              Designed with warm surfaces, editorial typography, and a focused control layout inspired by your design system.
+            </Typography>
+          </Box>
+        </Stack>
       </Paper>
     </Container>
   )

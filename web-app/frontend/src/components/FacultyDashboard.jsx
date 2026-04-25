@@ -1,28 +1,46 @@
-import React, { useState, useEffect } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import {
-  Box, Card, CardContent, Tabs, Tab, Typography,
-  Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
-  Button, Chip, CircularProgress, Paper, Grid, TextField, Alert
+  Box,
+  Typography,
+  Tabs,
+  Tab,
+  Paper,
+  Grid,
+  Card,
+  CardContent,
+  CircularProgress,
+  Alert,
+  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  TextField,
+  Chip,
+  Stack
 } from '@mui/material'
-import { Bar } from 'react-chartjs-2'
 import api from '../api.jsx'
 
 function TabPanel({ children, value, index }) {
-  return value === index ? <Box sx={{ p: 2 }}>{children}</Box> : null
+  return value === index ? <Box sx={{ py: 2 }}>{children}</Box> : null
 }
 
 function FacultyDashboard() {
   const [tabIndex, setTabIndex] = useState(0)
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+
+  const [profile, setProfile] = useState(null)
   const [courses, setCourses] = useState([])
-  const [selectedCourse, setSelectedCourse] = useState(null)
-  const [courseStudents, setCourseStudents] = useState([])
+  const [selectedCourseId, setSelectedCourseId] = useState('')
+  const [courseReport, setCourseReport] = useState(null)
+
   const [threshold, setThreshold] = useState(75)
   const [thresholdInput, setThresholdInput] = useState('75')
-  const [success, setSuccess] = useState('')
-  const [error, setError] = useState('')
 
-  // Past Attendance
   const [pastRecords, setPastRecords] = useState([])
   const [pastLoading, setPastLoading] = useState(false)
   const [pastFilters, setPastFilters] = useState({
@@ -30,6 +48,57 @@ function FacultyDashboard() {
     date_to: new Date().toISOString().split('T')[0],
     student_name_filter: ''
   })
+
+  useEffect(() => {
+    loadBaseData()
+  }, [])
+
+  useEffect(() => {
+    if (selectedCourseId) {
+      loadCourseReport(selectedCourseId)
+    }
+  }, [selectedCourseId])
+
+  const selectedCourse = useMemo(
+    () => courses.find((course) => course.course_id === selectedCourseId),
+    [courses, selectedCourseId]
+  )
+
+  const loadBaseData = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const [profileRes, thresholdRes] = await Promise.all([
+        api.get('/users/me/profile'),
+        api.get('/settings/threshold')
+      ])
+
+      const profileData = profileRes.data || {}
+      setProfile(profileData)
+      setCourses(profileData.courses || [])
+
+      const thresholdValue = thresholdRes.data?.threshold || 75
+      setThreshold(thresholdValue)
+      setThresholdInput(String(thresholdValue))
+
+      if ((profileData.courses || []).length > 0) {
+        setSelectedCourseId(profileData.courses[0].course_id)
+      }
+    } catch {
+      setError('Failed to load faculty data')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const loadCourseReport = async (courseId) => {
+    try {
+      const res = await api.get(`/reports/course/${courseId}`)
+      setCourseReport(res.data || null)
+    } catch {
+      setError('Failed to load course report')
+    }
+  }
 
   const loadPastAttendance = async () => {
     setPastLoading(true)
@@ -45,296 +114,231 @@ function FacultyDashboard() {
       setPastLoading(false)
     }
   }
-  
-  useEffect(() => {
-    loadData()
-  }, [])
-  
-  const loadData = async () => {
-    setLoading(true)
+
+  const saveThreshold = async () => {
+    const val = parseInt(thresholdInput, 10)
+    if (Number.isNaN(val) || val < 1 || val > 100) {
+      setError('Threshold must be between 1 and 100')
+      return
+    }
+
     try {
-      // In real app, fetch faculty's courses
-      setCourses([
-        { id: 'crs_001', name: 'Software Engineering' },
-        { id: 'crs_002', name: 'Database Design' }
-      ])
-      
-      // Load course-specific data if selected
-      if (selectedCourse) {
-        try {
-          const res = await api.get(`/attendance/course/${selectedCourse.id}`)
-          setCourseStudents(res.data || [])
-        } catch {}
-      }
-    } finally {
-      setLoading(false)
+      await api.post('/settings/threshold', { threshold: val })
+      setThreshold(val)
+      setSuccess(`Threshold updated to ${val}%`)
+    } catch {
+      setError('Failed to update threshold')
     }
   }
-  
+
+  const filteredPastRecords = useMemo(() => (
+    pastRecords.filter((r) => (
+      !pastFilters.student_name_filter ||
+      r.student_name?.toLowerCase().includes(pastFilters.student_name_filter.toLowerCase())
+    ))
+  ), [pastRecords, pastFilters.student_name_filter])
+
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', py: 12 }}>
+        <CircularProgress />
+      </Box>
+    )
+  }
+
   return (
     <Box>
-      <Typography variant="h4" sx={{ mb: 3 }}>Faculty Dashboard</Typography>
+      <Typography variant="h4" sx={{ mb: 2 }}>Faculty Studio</Typography>
+      <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
+        Track course attendance health, detect risk early, and keep class operations aligned.
+      </Typography>
 
-      {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
-      {success && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>{success}</Alert>}
+      {error ? <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert> : null}
+      {success ? <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>{success}</Alert> : null}
 
-      {/* Threshold Setting */}
-      <Card sx={{ mb: 3, p: 1 }}>
-        <CardContent>
-          <Typography variant="subtitle1" sx={{ mb: 1 }}><strong>Attendance Threshold</strong></Typography>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <TextField
-              label="Threshold %" type="number" size="small"
-              value={thresholdInput}
-              onChange={(e) => setThresholdInput(e.target.value)}
-              inputProps={{ min: 1, max: 100 }} sx={{ width: 120 }}
-            />
-            <Button variant="outlined" onClick={async () => {
-              const val = parseInt(thresholdInput)
-              if (isNaN(val) || val < 1 || val > 100) { setError('Must be 1-100'); return }
-              try {
-                await api.post('/settings/threshold', { threshold: val })
-              } catch {}
-              setThreshold(val)
-              setSuccess(`Threshold updated to ${val}%`)
-            }}>Save</Button>
-            <Typography variant="body2" color="textSecondary">Current: {threshold}%</Typography>
-          </Box>
-        </CardContent>
-      </Card>
-      
-      <Tabs value={tabIndex} onChange={(e, v) => setTabIndex(v)} sx={{ mb: 2 }}>
-        <Tab label="Live Attendance" />
-        <Tab label="Course Reports" />
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'center' }}>
+          <Typography variant="h6" sx={{ flex: 1 }}>Attendance Threshold</Typography>
+          <TextField
+            label="Threshold %"
+            type="number"
+            size="small"
+            value={thresholdInput}
+            onChange={(e) => setThresholdInput(e.target.value)}
+            inputProps={{ min: 1, max: 100 }}
+            sx={{ width: 140 }}
+          />
+          <Button variant="contained" onClick={saveThreshold}>Save</Button>
+          <Chip label={`Current ${threshold}%`} />
+        </Stack>
+      </Paper>
+
+      <Tabs value={tabIndex} onChange={(e, v) => setTabIndex(v)}>
+        <Tab label="Course Insights" />
         <Tab label="Past Attendance" />
         <Tab label="At-Risk Students" />
       </Tabs>
-      
-      {/* Tab 1: Live Attendance */}
-      <TabPanel value={tabIndex} index={0}>
-        <Card sx={{ mb: 3 }}>
-          <CardContent>
-            <Typography variant="h6" sx={{ mb: 2 }}>Current Class</Typography>
-            <Grid container spacing={2}>
-              <Grid item xs={12} sm={6}>
-                <label>
-                  <strong>Select Course:</strong>
-                  <select
-                    value={selectedCourse?.id || ''}
-                    onChange={(e) => {
-                      const course = courses.find(c => c.id === e.target.value)
-                      setSelectedCourse(course)
-                    }}
-                    style={{ marginLeft: 10, padding: 8, borderRadius: 4, border: '1px solid #ddd' }}
-                  >
-                    <option value="">-- Select Course --</option>
-                    {courses.map(c => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
-                </label>
-              </Grid>
-            </Grid>
-            
-            {selectedCourse && (
-              <>
-                <Typography variant="body2" sx={{ mt: 2, mb: 1 }}>
-                  <strong>Present Today:</strong>
-                </Typography>
-                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-                  {['Alice Rahman', 'Bob Chen', 'Carol Martinez'].map(name => (
-                    <Chip key={name} label={name} color="primary" />
-                  ))}
-                </Box>
-              </>
-            )}
-          </CardContent>
-        </Card>
-      </TabPanel>
-      
-      {/* Tab 2: Course Reports */}
-      <TabPanel value={tabIndex} index={1}>
-        <label sx={{ mb: 2 }}>
-          <strong>Select Course:</strong>
-          <select
-            value={selectedCourse?.id || ''}
-            onChange={(e) => {
-              const course = courses.find(c => c.id === e.target.value)
-              setSelectedCourse(course)
-              loadData()
-            }}
-            style={{ marginLeft: 10, padding: 8, borderRadius: 4, border: '1px solid #ddd' }}
-          >
-            <option value="">-- Select Course --</option>
-            {courses.map(c => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
-          </select>
-        </label>
-        
-        {selectedCourse && loading ? (
-          <CircularProgress />
-        ) : selectedCourse ? (
-          <>
-            <Box sx={{ height: 300, mb: 3 }}>
-              <Bar
-                data={{
-                  labels: ['Alice', 'Bob', 'Carol', 'David', 'Eve'],
-                  datasets: [{
-                    label: 'Attendance %',
-                    data: [85, 78, 92, 70, 88],
-                    backgroundColor: '#1976d2'
-                  }]
-                }}
-                options={{ responsive: true, maintainAspectRatio: false }}
-              />
-            </Box>
-            
-            <TableContainer component={Paper}>
-              <Table size="small">
-                <TableHead>
-                  <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
-                    <TableCell>Student Name</TableCell>
-                    <TableCell>Present</TableCell>
-                    <TableCell>Total</TableCell>
-                    <TableCell>Attendance %</TableCell>
-                    <TableCell>Status</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {['Alice Rahman', 'Bob Chen', 'Carol Martinez', 'David Smith', 'Eve Johnson'].map(name => {
-                    const pct = Math.floor(Math.random() * 40 + 60)
-                    return (
-                      <TableRow key={name}>
-                        <TableCell>{name}</TableCell>
-                        <TableCell>20</TableCell>
-                        <TableCell>25</TableCell>
-                        <TableCell>{pct}%</TableCell>
-                        <TableCell>
-                          <Chip
-                            label={pct >= 75 ? 'OK' : pct >= 60 ? 'AT-RISK' : 'CRITICAL'}
-                            color={pct >= 75 ? 'success' : pct >= 60 ? 'warning' : 'error'}
-                            size="small"
-                          />
-                        </TableCell>
-                      </TableRow>
-                    )
-                  })}
-                </TableBody>
-              </Table>
-            </TableContainer>
-          </>
-        ) : null}
-      </TabPanel>
-      
-      {/* Tab 3: Past Attendance */}
-      <TabPanel value={tabIndex} index={2}>
-        <Typography variant="h6" sx={{ mb: 2 }}>Past Attendance Records</Typography>
-        <Card sx={{ mb: 2 }}>
-          <CardContent>
-            <Grid container spacing={2} alignItems="center">
-              <Grid item xs={12} sm={3}>
-                <TextField fullWidth label="From Date" type="date" size="small"
-                  value={pastFilters.date_from}
-                  onChange={(e) => setPastFilters({ ...pastFilters, date_from: e.target.value })}
-                  InputLabelProps={{ shrink: true }} />
-              </Grid>
-              <Grid item xs={12} sm={3}>
-                <TextField fullWidth label="To Date" type="date" size="small"
-                  value={pastFilters.date_to}
-                  onChange={(e) => setPastFilters({ ...pastFilters, date_to: e.target.value })}
-                  InputLabelProps={{ shrink: true }} />
-              </Grid>
-              <Grid item xs={12} sm={4}>
-                <TextField fullWidth label="Filter by Student Name" size="small"
-                  value={pastFilters.student_name_filter}
-                  onChange={(e) => setPastFilters({ ...pastFilters, student_name_filter: e.target.value })} />
-              </Grid>
-              <Grid item xs={12} sm={2}>
-                <Button fullWidth variant="contained" onClick={loadPastAttendance}>Search</Button>
-              </Grid>
-            </Grid>
-          </CardContent>
-        </Card>
 
-        {pastLoading ? <CircularProgress /> : (
-          <>
-            <Typography variant="body2" color="textSecondary" sx={{ mb: 1 }}>
-              {pastRecords.length} records found
-            </Typography>
-            <TableContainer component={Paper}>
+      <TabPanel value={tabIndex} index={0}>
+        <Paper sx={{ p: 2, mb: 2 }}>
+          <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'center' }}>
+            <Typography variant="h6" sx={{ minWidth: 180 }}>Select Course</Typography>
+            <TextField
+              select
+              SelectProps={{ native: true }}
+              size="small"
+              value={selectedCourseId}
+              onChange={(e) => setSelectedCourseId(e.target.value)}
+              sx={{ minWidth: 260 }}
+            >
+              <option value="">Choose a course</option>
+              {courses.map((course) => (
+                <option key={course.course_id} value={course.course_id}>
+                  {course.course_code} - {course.course_name}
+                </option>
+              ))}
+            </TextField>
+          </Stack>
+        </Paper>
+
+        {selectedCourse && courseReport ? (
+          <Grid container spacing={2}>
+            <Grid item xs={12} md={4}>
+              <Card>
+                <CardContent>
+                  <Typography variant="overline" color="text.secondary">Course</Typography>
+                  <Typography variant="h6">{courseReport.course_name}</Typography>
+                </CardContent>
+              </Card>
+            </Grid>
+            <Grid item xs={12} md={4}>
+              <Card>
+                <CardContent>
+                  <Typography variant="overline" color="text.secondary">Attendance %</Typography>
+                  <Typography variant="h5">{courseReport.attendance_pct || 0}%</Typography>
+                </CardContent>
+              </Card>
+            </Grid>
+            <Grid item xs={12} md={4}>
+              <Card>
+                <CardContent>
+                  <Typography variant="overline" color="text.secondary">Enrolled Students</Typography>
+                  <Typography variant="h5">{courseReport.total_enrolled || 0}</Typography>
+                </CardContent>
+              </Card>
+            </Grid>
+          </Grid>
+        ) : (
+          <Paper sx={{ p: 3 }}>
+            <Typography color="text.secondary">Select a course to view insights.</Typography>
+          </Paper>
+        )}
+      </TabPanel>
+
+      <TabPanel value={tabIndex} index={1}>
+        <Paper sx={{ p: 2, mb: 2 }}>
+          <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5}>
+            <TextField
+              label="From"
+              type="date"
+              size="small"
+              value={pastFilters.date_from}
+              onChange={(e) => setPastFilters({ ...pastFilters, date_from: e.target.value })}
+              InputLabelProps={{ shrink: true }}
+            />
+            <TextField
+              label="To"
+              type="date"
+              size="small"
+              value={pastFilters.date_to}
+              onChange={(e) => setPastFilters({ ...pastFilters, date_to: e.target.value })}
+              InputLabelProps={{ shrink: true }}
+            />
+            <TextField
+              label="Student name"
+              size="small"
+              value={pastFilters.student_name_filter}
+              onChange={(e) => setPastFilters({ ...pastFilters, student_name_filter: e.target.value })}
+            />
+            <Button variant="contained" onClick={loadPastAttendance}>Search</Button>
+          </Stack>
+        </Paper>
+
+        <Paper sx={{ p: 2 }}>
+          {pastLoading ? <CircularProgress /> : (
+            <TableContainer>
               <Table size="small">
                 <TableHead>
-                  <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
+                  <TableRow>
                     <TableCell>Date & Time</TableCell>
                     <TableCell>Student</TableCell>
-                    <TableCell>Student #</TableCell>
                     <TableCell>Room</TableCell>
                     <TableCell>Status</TableCell>
                     <TableCell>Match Score</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {pastRecords
-                    .filter(r => !pastFilters.student_name_filter ||
-                      r.student_name?.toLowerCase().includes(pastFilters.student_name_filter.toLowerCase()))
-                    .map((rec) => (
-                      <TableRow key={rec.record_id}>
-                        <TableCell>{new Date(rec.timestamp).toLocaleString()}</TableCell>
-                        <TableCell>{rec.student_name}</TableCell>
-                        <TableCell>{rec.student_number}</TableCell>
-                        <TableCell>{rec.room_number}</TableCell>
-                        <TableCell>
-                          <Chip label={rec.status} size="small"
-                            color={rec.status === 'present' ? 'success' : rec.status === 'manual' ? 'warning' : 'error'} />
-                        </TableCell>
-                        <TableCell>{rec.match_score ?? '—'}</TableCell>
-                      </TableRow>
-                    ))}
+                  {filteredPastRecords.map((rec) => (
+                    <TableRow key={rec.record_id}>
+                      <TableCell>{new Date(rec.timestamp).toLocaleString()}</TableCell>
+                      <TableCell>{rec.student_name}</TableCell>
+                      <TableCell>{rec.room_number}</TableCell>
+                      <TableCell>{rec.status}</TableCell>
+                      <TableCell>{rec.match_score ?? '-'}</TableCell>
+                    </TableRow>
+                  ))}
                 </TableBody>
               </Table>
             </TableContainer>
-          </>
-        )}
+          )}
+        </Paper>
       </TabPanel>
 
-      {/* Tab 4: At-Risk Students */}
-      <TabPanel value={tabIndex} index={3}>
-        <Typography variant="subtitle2" sx={{ mb: 2 }}>
-          Students below {threshold}% attendance threshold
-        </Typography>
-        
-        <TableContainer component={Paper}>
-          <Table>
-            <TableHead>
-              <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
-                <TableCell>Student Name</TableCell>
-                <TableCell>Course</TableCell>
-                <TableCell>Attendance %</TableCell>
-                <TableCell>Status</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {[
-                { name: 'Frank Lee', course: 'Software Engineering', pct: 65 },
-                { name: 'Henry Patel', course: 'Database Design', pct: 58 }
-              ].map(student => (
-                <TableRow key={student.name}>
-                  <TableCell>{student.name}</TableCell>
-                  <TableCell>{student.course}</TableCell>
-                  <TableCell><strong>{student.pct}%</strong></TableCell>
-                  <TableCell>
-                    <Chip
-                      label={student.pct >= 60 ? 'AMBER' : 'RED'}
-                      color={student.pct >= 60 ? 'warning' : 'error'}
-                      size="small"
-                    />
-                  </TableCell>
+      <TabPanel value={tabIndex} index={2}>
+        <Paper sx={{ p: 2 }}>
+          <Typography variant="h6" sx={{ mb: 1.5 }}>
+            At-Risk Students {selectedCourse ? `for ${selectedCourse.course_name}` : ''}
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Students below {threshold}% threshold are highlighted for intervention.
+          </Typography>
+
+          <TableContainer>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableCell>Name</TableCell>
+                  <TableCell>Student Number</TableCell>
+                  <TableCell>Attendance %</TableCell>
+                  <TableCell>Status</TableCell>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </TableContainer>
+              </TableHead>
+              <TableBody>
+                {(courseReport?.at_risk_students || []).map((student) => (
+                  <TableRow key={student.student_id}>
+                    <TableCell>{student.full_name}</TableCell>
+                    <TableCell>{student.student_number}</TableCell>
+                    <TableCell>{student.attendance_pct}%</TableCell>
+                    <TableCell>
+                      <Chip
+                        size="small"
+                        label={student.attendance_pct < 60 ? 'Critical' : 'At Risk'}
+                        color={student.attendance_pct < 60 ? 'error' : 'warning'}
+                      />
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {(courseReport?.at_risk_students || []).length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={4}>
+                      <Typography color="text.secondary">No at-risk students for the selected course.</Typography>
+                    </TableCell>
+                  </TableRow>
+                ) : null}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </Paper>
       </TabPanel>
     </Box>
   )
