@@ -37,6 +37,8 @@ logger = logging.getLogger('ESP32')
 # Environment variables
 MQTT_BROKER = os.getenv('MQTT_BROKER', 'mosquitto')
 MQTT_PORT = int(os.getenv('MQTT_PORT', 1883))
+MQTT_USERNAME = os.getenv('MQTT_USERNAME')
+MQTT_PASSWORD = os.getenv('MQTT_PASSWORD')
 BACKEND_URL = os.getenv('BACKEND_URL', 'http://backend:8000')
 DEVICE_SERVICE_TOKEN = os.getenv('DEVICE_SERVICE_TOKEN', 'device_service_token_secret_key')
 AES_KEY_HEX = os.getenv('AES_KEY', '0123456789abcdef0123456789abcdef')
@@ -100,6 +102,8 @@ def wait_for_dependencies(max_retries: int = 60, delay: int = 1) -> bool:
     for attempt in range(max_retries):
         try:
             test_client = mqtt.Client()
+            if MQTT_USERNAME and MQTT_PASSWORD:
+                test_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
             test_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=5)
             test_client.disconnect()
             mqtt_ready = True
@@ -404,7 +408,12 @@ def main():
     mqtt_client.on_connect = on_mqtt_connect
     mqtt_client.on_disconnect = on_mqtt_disconnect
     mqtt_client.on_message = on_mqtt_message
-    
+
+    # Set authentication if credentials provided
+    if MQTT_USERNAME and MQTT_PASSWORD:
+        mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+        logger.info("✓ MQTT authentication configured")
+
     try:
         mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
         mqtt_client.loop_start()

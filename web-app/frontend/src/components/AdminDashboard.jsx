@@ -72,6 +72,9 @@ function AdminDashboard() {
     timestamp: ''
   })
 
+  const [courses, setCourses] = useState({})
+  const [coursesLoading, setCoursesLoading] = useState(false)
+
   const recentScans = useAttendanceStore((state) => state.recentScans)
 
   useEffect(() => {
@@ -148,6 +151,18 @@ function AdminDashboard() {
     }
   }
 
+  const loadCourses = async () => {
+    setCoursesLoading(true)
+    try {
+      const res = await api.get('/courses')
+      setCourses(res.data?.semesters || {})
+    } catch {
+      setError('Failed to load courses')
+    } finally {
+      setCoursesLoading(false)
+    }
+  }
+
   const handleDeleteAttendance = async (recordId) => {
     if (!window.confirm('Delete this attendance record?')) return
     try {
@@ -206,6 +221,7 @@ function AdminDashboard() {
         <Tab label="Enrollment" />
         <Tab label="Attendance" />
         <Tab label="Devices" />
+        <Tab label="Courses" />
       </Tabs>
 
       <TabPanel value={tabIndex} index={0}>
@@ -381,6 +397,74 @@ function AdminDashboard() {
               </TableBody>
             </Table>
           </TableContainer>
+        </Paper>
+      </TabPanel>
+
+      <TabPanel value={tabIndex} index={4}>
+        <Paper sx={{ p: 2 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+            <Typography variant="h6">NITER CSE Curriculum</Typography>
+            <Button variant="outlined" onClick={loadCourses} disabled={coursesLoading}>
+              {coursesLoading ? 'Loading...' : 'Refresh Courses'}
+            </Button>
+          </Box>
+          {coursesLoading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : Object.keys(courses).length === 0 ? (
+            <Typography color="text.secondary" sx={{ py: 4, textAlign: 'center' }}>
+              Click "Refresh Courses" to load the curriculum data
+            </Typography>
+          ) : (
+            Object.entries(courses).map(([semesterKey, semesterCourses]) => (
+              <Paper key={semesterKey} sx={{ mb: 2, p: 2, bgcolor: 'background.paper' }}>
+                <Typography variant="h6" sx={{ mb: 1.5, color: 'primary.main' }}>
+                  {semesterKey}
+                </Typography>
+                <TableContainer>
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Course Code</TableCell>
+                        <TableCell>Course Title</TableCell>
+                        <TableCell>Type</TableCell>
+                        <TableCell>Credits</TableCell>
+                        <TableCell>Prerequisites</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {semesterCourses.map((course) => (
+                        <TableRow key={course.course_id}>
+                          <TableCell><strong>{course.course_code}</strong></TableCell>
+                          <TableCell>{course.course_name}</TableCell>
+                          <TableCell>
+                            <Chip
+                              size="small"
+                              label={course.course_type}
+                              color={course.course_type === 'Theory' ? 'primary' : course.course_type === 'Lab' ? 'secondary' : 'default'}
+                            />
+                          </TableCell>
+                          <TableCell>{course.credits}</TableCell>
+                          <TableCell>
+                            {course.prerequisites ? (
+                              <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                                {course.prerequisites.split(',').map((prereq, idx) => (
+                                  <Chip key={idx} size="small" variant="outlined" label={prereq.trim()} sx={{ mb: 0.5 }} />
+                                ))}
+                              </Stack>
+                            ) : (
+                              <Typography variant="body2" color="text.secondary">None</Typography>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </Paper>
+            ))
+          )}
         </Paper>
       </TabPanel>
 

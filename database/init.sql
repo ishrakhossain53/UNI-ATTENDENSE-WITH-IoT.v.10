@@ -66,9 +66,13 @@ CREATE TABLE classrooms (
 CREATE TABLE courses (
     course_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     course_code VARCHAR(20) UNIQUE NOT NULL,
-    course_name VARCHAR(100) NOT NULL,
+    course_name VARCHAR(200) NOT NULL,
     faculty_id UUID REFERENCES users(user_id),
     semester VARCHAR(20),
+    year INTEGER,
+    course_type VARCHAR(20) CHECK (course_type IN ('Theory', 'Lab', 'Project')),
+    credits DECIMAL(3,1),
+    prerequisites VARCHAR(200),
     is_active BOOLEAN DEFAULT TRUE
 );
 
@@ -277,13 +281,101 @@ VALUES
     ('102', 'A', 35, 'ESP32_CLASSROOM_102'),
     ('103', 'B', 40, 'ESP32_CLASSROOM_103');
 
--- 5. Create courses (faculty1 has 2, faculty2 has 1)
-INSERT INTO courses (course_code, course_name, faculty_id, semester, is_active)
-SELECT 'SE101', 'Software Engineering', user_id, '2024-Spring', TRUE FROM users WHERE username = 'faculty1'
-UNION ALL
-SELECT 'DB101', 'Database Design', user_id, '2024-Spring', TRUE FROM users WHERE username = 'faculty1'
-UNION ALL
-SELECT 'AI101', 'Artificial Intelligence', user_id, '2024-Spring', TRUE FROM users WHERE username = 'faculty2';
+-- 5. Create courses (NITER CSE Curriculum - 56 courses across 8 semesters)
+-- Semester I, Year 1
+INSERT INTO courses (course_code, course_name, year, semester, course_type, credits, prerequisites, is_active) VALUES
+('CSE-1101', 'Fundamentals of Computers and Computing', 1, 'Semester I', 'Theory', 2.0, NULL, TRUE),
+('CSE-1102', 'Discrete Mathematics', 1, 'Semester I', 'Theory', 3.0, NULL, TRUE),
+('EEE-1103', 'Electrical Circuits', 1, 'Semester I', 'Theory', 3.0, NULL, TRUE),
+('CHE-1104', 'Chemistry', 1, 'Semester I', 'Theory', 3.0, NULL, TRUE),
+('MATH-1105', 'Differential and Integral Calculus', 1, 'Semester I', 'Theory', 3.0, NULL, TRUE),
+('SS-1106', 'Government and Public Administration', 1, 'Semester I', 'Theory', 2.0, NULL, TRUE),
+('CSE-1111', 'Fundamentals of Computers and Computing Lab', 1, 'Semester I', 'Lab', 1.5, NULL, TRUE),
+('EEE-1113', 'Electrical Circuits Lab', 1, 'Semester I', 'Lab', 1.5, NULL, TRUE),
+('CHE-1114', 'Chemistry Lab', 1, 'Semester I', 'Lab', 1.5, NULL, TRUE);
+
+-- Semester II, Year 1
+INSERT INTO courses (course_code, course_name, year, semester, course_type, credits, prerequisites, is_active) VALUES
+('CSE-1201', 'Fundamentals of Programming', 1, 'Semester II', 'Theory', 3.0, 'CSE-1101, CSE-1102', TRUE),
+('CSE-1202', 'Digital Logic Design', 1, 'Semester II', 'Theory', 3.0, NULL, TRUE),
+('PHY-1203', 'Physics', 1, 'Semester II', 'Theory', 3.0, NULL, TRUE),
+('MATH-1204', 'Methods of Integration Differential Equations and Series', 1, 'Semester II', 'Theory', 3.0, 'MATH-1105', TRUE),
+('ENG-1205', 'Developing English Language Skills', 1, 'Semester II', 'Theory', 2.0, NULL, TRUE),
+('CSE-1211', 'Fundamentals of Programming Lab', 1, 'Semester II', 'Lab', 3.0, 'CSE-1111', TRUE),
+('CSE-1212', 'Digital Logic Design Lab', 1, 'Semester II', 'Lab', 1.5, NULL, TRUE),
+('PHY-1213', 'Physics Lab', 1, 'Semester II', 'Lab', 1.5, NULL, TRUE),
+('ENG-1215', 'Developing English Language Skills Lab', 1, 'Semester II', 'Lab', 1.5, NULL, TRUE);
+
+-- Semester III, Year 2
+INSERT INTO courses (course_code, course_name, year, semester, course_type, credits, prerequisites, is_active) VALUES
+('CSE-2101', 'Data Structures and Algorithms', 2, 'Semester III', 'Theory', 3.0, 'CSE-1201', TRUE),
+('CSE-2102', 'Object Oriented Programming', 2, 'Semester III', 'Theory', 3.0, 'CSE-1201', TRUE),
+('CSE-2103', 'Digital Electronics and Pulse Techniques', 2, 'Semester III', 'Theory', 3.0, 'CSE-1202', TRUE),
+('EEE-2104', 'Electronic Devices and Circuits', 2, 'Semester III', 'Theory', 3.0, 'CSE-1202', TRUE),
+('MATH-2105', 'Linear Algebra', 2, 'Semester III', 'Theory', 3.0, 'MATH-1204', TRUE),
+('SS-2106', 'Bangladesh Studies', 2, 'Semester III', 'Theory', 2.0, NULL, TRUE),
+('CSE-2111', 'Data Structures and Algorithms Lab', 2, 'Semester III', 'Lab', 1.5, 'CSE-1211', TRUE),
+('CSE-2112', 'Object Oriented Programming Lab', 2, 'Semester III', 'Lab', 1.5, 'CSE-1211', TRUE),
+('CSE-2113', 'Digital Electronics and Pulse Techniques Lab', 2, 'Semester III', 'Lab', 1.5, 'CSE-1212', TRUE),
+('EEE-2114', 'Electronic Devices and Circuits Lab', 2, 'Semester III', 'Lab', 0.75, 'CSE-1212', TRUE);
+
+-- Semester IV, Year 2
+INSERT INTO courses (course_code, course_name, year, semester, course_type, credits, prerequisites, is_active) VALUES
+('CSE-2201', 'Database Management Systems-I', 2, 'Semester IV', 'Theory', 3.0, 'CSE-2101', TRUE),
+('CSE-2202', 'Design and Analysis of Algorithms-I', 2, 'Semester IV', 'Theory', 3.0, 'CSE-2101', TRUE),
+('CSE-2203', 'Data and Telecommunication', 2, 'Semester IV', 'Theory', 3.0, 'CSE-2101', TRUE),
+('CSE-2204', 'Computer Architecture and Organization', 2, 'Semester IV', 'Theory', 3.0, 'CSE-1202', TRUE),
+('CSE-2205', 'Introduction to Mechatronics', 2, 'Semester IV', 'Theory', 2.0, 'EEE-1103, CSE-1202', TRUE),
+('CSE-2211', 'Database Management Systems-I Lab', 2, 'Semester IV', 'Lab', 1.5, 'CSE-2111', TRUE),
+('CSE-2212', 'Design and Analysis of Algorithms-I Lab', 2, 'Semester IV', 'Lab', 1.5, 'CSE-2111', TRUE),
+('CSE-2213', 'Data and Telecommunication Lab', 2, 'Semester IV', 'Lab', 0.75, 'CSE-2111', TRUE),
+('CSE-2216', 'Application Development Lab', 2, 'Semester IV', 'Lab', 1.5, 'CSE-2101, CSE-2102, CSE-2111, CSE-2112', TRUE);
+
+-- Semester V, Year 3
+INSERT INTO courses (course_code, course_name, year, semester, course_type, credits, prerequisites, is_active) VALUES
+('CSE-3101', 'Computer Networking', 3, 'Semester V', 'Theory', 3.0, 'CSE-2203', TRUE),
+('CSE-3102', 'Software Engineering', 3, 'Semester V', 'Theory', 3.0, 'CSE-2101, CSE-2102', TRUE),
+('CSE-3103', 'Microprocessor and Microcontroller', 3, 'Semester V', 'Theory', 3.0, 'CSE-2204', TRUE),
+('CSE-3104', 'Database Management Systems-II', 3, 'Semester V', 'Theory', 3.0, 'CSE-2201', TRUE),
+('MATH-3105', 'Multivariable Calculus and Geometry', 3, 'Semester V', 'Theory', 3.0, 'MATH-2105', TRUE),
+('CSE-3111', 'Computer Networking Lab', 3, 'Semester V', 'Lab', 1.5, 'CSE-2213', TRUE),
+('CSE-3112', 'Software Engineering Lab', 3, 'Semester V', 'Lab', 0.75, 'CSE-2111, CSE-2112', TRUE),
+('CSE-3113', 'Microprocessor and Assembly Language Lab', 3, 'Semester V', 'Lab', 1.5, NULL, TRUE),
+('CSE-3116', 'Microcontroller Lab', 3, 'Semester V', 'Lab', 0.75, NULL, TRUE);
+
+-- Semester VI, Year 3
+INSERT INTO courses (course_code, course_name, year, semester, course_type, credits, prerequisites, is_active) VALUES
+('CSE-3201', 'Operating Systems', 3, 'Semester VI', 'Theory', 3.0, 'CSE-2202, CSE-2204', TRUE),
+('CSE-3202', 'Numerical Methods', 3, 'Semester VI', 'Theory', 3.0, 'CSE-2202', TRUE),
+('CSE-3203', 'Design and Analysis of Algorithms-II', 3, 'Semester VI', 'Theory', 3.0, 'CSE-2202', TRUE),
+('CSE-3204', 'Formal Language Automata and Computability', 3, 'Semester VI', 'Theory', 3.0, 'CSE-1102', TRUE),
+('STAT-3205', 'Introduction to Probability and Statistics', 3, 'Semester VI', 'Theory', 3.0, NULL, TRUE),
+('CSE-3211', 'Operating Systems Lab', 3, 'Semester VI', 'Lab', 1.5, 'CSE-2212', TRUE),
+('CSE-3212', 'Numerical Methods Lab', 3, 'Semester VI', 'Lab', 0.75, 'CSE-2212', TRUE),
+('CSE-3216', 'Software Design Patterns Lab', 3, 'Semester VI', 'Lab', 1.5, 'CSE-3112', TRUE),
+('ENG-3217', 'Technical Writing and Presentation Lab', 3, 'Semester VI', 'Lab', 0.75, 'ENG-1215', TRUE);
+
+-- Semester VII, Year 4
+INSERT INTO courses (course_code, course_name, year, semester, course_type, credits, prerequisites, is_active) VALUES
+('CSE-4101', 'Artificial Intelligence', 4, 'Semester VII', 'Theory', 3.0, 'CSE-2202', TRUE),
+('CSE-4102', 'Mathematical and Statistical Analysis for Engineers', 4, 'Semester VII', 'Theory', 3.0, 'MATH-2105, MATH-3105, STAT-3205', TRUE),
+('SS-4103', 'Entrepreneurship for IT Business', 4, 'Semester VII', 'Theory', 2.0, NULL, TRUE),
+('CSE-4XXX-1', 'Option-I (Theory)', 4, 'Semester VII', 'Theory', 3.0, NULL, TRUE),
+('CSE-4XXX-2', 'Option-II (Theory)', 4, 'Semester VII', 'Theory', 3.0, NULL, TRUE),
+('CSE-4111', 'Artificial Intelligence Lab', 4, 'Semester VII', 'Lab', 1.5, 'CSE-2212', TRUE),
+('CSE-4XXX-1L', 'Option-I Lab', 4, 'Semester VII', 'Lab', 1.5, NULL, TRUE),
+('CSE-4113', 'Internet Programming Lab', 4, 'Semester VII', 'Lab', 1.5, 'CSE-2216', TRUE),
+('CSE-4114', 'Project (Part 1)', 4, 'Semester VII', 'Project', 2.0, NULL, TRUE);
+
+-- Semester VIII, Year 4
+INSERT INTO courses (course_code, course_name, year, semester, course_type, credits, prerequisites, is_active) VALUES
+('ECO-4201', 'Economics', 4, 'Semester VIII', 'Theory', 2.0, NULL, TRUE),
+('CSE-4202', 'Society and Technology', 4, 'Semester VIII', 'Theory', 2.0, NULL, TRUE),
+('SS-4203', 'Engineering Ethics', 4, 'Semester VIII', 'Theory', 2.0, NULL, TRUE),
+('CSE-4XXX-3', 'Option-III (Theory)', 4, 'Semester VIII', 'Theory', 3.0, NULL, TRUE),
+('CSE-4XXX-4', 'Option-IV (Theory)', 4, 'Semester VIII', 'Theory', 3.0, NULL, TRUE),
+('CSE-4XXX-3L', 'Option-III Lab', 4, 'Semester VIII', 'Lab', 1.5, NULL, TRUE),
+('CSE-4214', 'Project (Part 2)', 4, 'Semester VIII', 'Project', 4.0, 'CSE-4114', TRUE);
 
 -- 6. Create student records linked to users
 INSERT INTO students (user_id, student_number, full_name, department, semester, is_active)

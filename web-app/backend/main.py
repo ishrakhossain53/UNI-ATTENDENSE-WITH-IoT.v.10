@@ -71,10 +71,19 @@ POSTGRES_USER = os.getenv('POSTGRES_USER', 'attendance_user')
 POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'SecurePass123!')
 REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
-JWT_SECRET = os.getenv('JWT_SECRET', 'supersecretjwtkey_change_in_production')
+JWT_SECRET = os.getenv('JWT_SECRET')
+if not JWT_SECRET:
+    logger.error("JWT_SECRET environment variable is required")
+    sys.exit(1)
 JWT_EXPIRY_HOURS = int(os.getenv('JWT_EXPIRY_HOURS', 1))
-AES_KEY_HEX = os.getenv('AES_KEY', '0123456789abcdef0123456789abcdef')
-DEVICE_SERVICE_TOKEN = os.getenv('DEVICE_SERVICE_TOKEN', 'dev-device-token-change-me')
+AES_KEY_HEX = os.getenv('AES_KEY')
+if not AES_KEY_HEX:
+    logger.error("AES_KEY environment variable is required")
+    sys.exit(1)
+DEVICE_SERVICE_TOKEN = os.getenv('DEVICE_SERVICE_TOKEN')
+if not DEVICE_SERVICE_TOKEN:
+    logger.error("DEVICE_SERVICE_TOKEN environment variable is required")
+    sys.exit(1)
 ALLOWED_ORIGINS_ENV = os.getenv('ALLOWED_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000,http://frontend:3000')
 ALLOWED_ORIGINS = [origin.strip() for origin in ALLOWED_ORIGINS_ENV.split(',') if origin.strip()]
 
@@ -1020,6 +1029,12 @@ async def list_students(request: Request, offset: int = 0, limit: int = 50):
     user = get_current_user(request)
     if not user or user.get('role') != 'admin':
         raise HTTPException(status_code=403, detail="Admin only")
+
+    # Validate and cap limit parameter
+    if limit < 1:
+        limit = 1
+    elif limit > 1000:
+        limit = 1000
     
     try:
         conn = db_pool.get_conn()
@@ -1673,6 +1688,13 @@ async def get_attendance_history(
     user = get_current_user(request)
     if not user or user.get('role') not in ('admin', 'faculty'):
         raise HTTPException(status_code=403, detail="Admin or Faculty only")
+
+    # Validate and cap limit parameter
+    if limit < 1:
+        limit = 1
+    elif limit > 1000:
+        limit = 1000
+
     try:
         conn = db_pool.get_conn()
         cur = conn.cursor()
@@ -1827,37 +1849,35 @@ async def update_attendance_record(request: Request, record_id: str, update_data
         raise HTTPException(status_code=403, detail="Admin only")
     
     try:
-        conn = db_pool.get_conn()
-        cur = conn.cursor()
-        
-        # Check if record exists
-        cur.execute("SELECT record_id FROM attendance_records WHERE record_id = %s", (record_id,))
-        if not cur.fetchone():
-            cur.close()
-            db_pool.put_conn(conn)
-            raise HTTPException(status_code=404, detail="Attendance record not found")
-        
-        # Build update query dynamically based on provided fields
+        # Build update query dynamically using safe SQL composition
         allowed_fields = ['status', 'verification_method', 'match_score', 'timestamp']
         updates = []
         params = []
-        
+
         payload = update_data.model_dump(exclude_none=True)
         for field in allowed_fields:
             if field in payload:
-                updates.append(f"{field} = %s")
+                # Use sql.Identifier for safe field name composition
+                updates.append(sql.Identifier(field) + sql.SQL(" = %s"))
                 params.append(payload[field])
-        
+
         if not updates:
             raise HTTPException(status_code=400, detail="No valid fields to update")
-        
+
         params.append(record_id)
-        update_query = f"UPDATE attendance_records SET {', '.join(updates)} WHERE record_id = %s"
-        
-        cur.execute(update_query, params)
-        conn.commit()
-        cur.close()
-        db_pool.put_conn(conn)
+
+        with db_pool.get_cursor() as (conn, cur):
+            # Check if record exists
+            cur.execute("SELECT record_id FROM attendance_records WHERE record_id = %s", (record_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Attendance record not found")
+
+            # Build safe update query
+            update_query = sql.SQL("UPDATE attendance_records SET ") + \
+                          sql.SQL(", ").join(updates) + \
+                          sql.SQL(" WHERE record_id = %s")
+
+            cur.execute(update_query, params)
         
         log_audit(user['user_id'], "update_attendance", "attendance_record", record_id, get_user_ip(request), get_user_agent(request))
         
@@ -2357,9 +2377,54 @@ async def gateway_heartbeat(request: Request, heartbeat: GatewayHeartbeat):
     # Update Redis cache for gateway status
     if redis_client:
         redis_client.setex(f"gateway:{heartbeat.gateway_id}:health", 120, json.dumps(heartbeat.dict()))
-    
+
     logger.info(f"[Gateway] Heartbeat: {heartbeat.gateway_id} | Queue: {heartbeat.queue_depth}")
     return {'status': 'ok'}
+
+
+# ============================================================================
+# ENDPOINTS: COURSES
+# ============================================================================
+
+@app.get("/api/courses")
+async def list_courses(request: Request):
+    """List all courses grouped by semester."""
+    user = get_current_user(request)
+    if not user or user['role'] != 'admin':
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    try:
+        with db_pool.get_cursor() as (_, cur):
+            cur.execute(
+                """SELECT course_id, course_code, course_name, year, semester,
+                          course_type, credits, prerequisites
+                   FROM courses
+                   WHERE is_active = TRUE
+                   ORDER BY year, semester, course_code"""
+            )
+            rows = cur.fetchall()
+
+        # Group by semester
+        semesters = {}
+        for row in rows:
+            semester_key = f"Year {row[3]} - {row[4]}"
+            if semester_key not in semesters:
+                semesters[semester_key] = []
+            semesters[semester_key].append({
+                'course_id': str(row[0]),
+                'course_code': row[1],
+                'course_name': row[2],
+                'year': row[3],
+                'semester': row[4],
+                'course_type': row[5],
+                'credits': float(row[6]) if row[6] else None,
+                'prerequisites': row[7]
+            })
+
+        return {'semesters': semesters}
+    except Exception as e:
+        logger.error(f"List courses error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============================================================================
@@ -2395,7 +2460,13 @@ async def get_audit_log(request: Request, offset: int = 0, limit: int = 50):
     user = get_current_user(request)
     if not user or user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Admin only")
-    
+
+    # Validate and cap limit parameter
+    if limit < 1:
+        limit = 1
+    elif limit > 1000:
+        limit = 1000
+
     try:
         conn = db_pool.get_conn()
         cur = conn.cursor()

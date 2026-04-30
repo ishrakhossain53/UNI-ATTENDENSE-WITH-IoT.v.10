@@ -18,12 +18,20 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
 
   redis:
     image: redis:6-alpine
     container_name: attendance_redis
     ports:
-      - "${REDIS_PORT}:6379"
+      - "6380:6379"
     networks:
       - attendance-net
     healthcheck:
@@ -31,6 +39,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
 
   mosquitto:
     image: eclipse-mosquitto:2
@@ -39,6 +55,7 @@ services:
       - "${MQTT_PORT}:1883"
     volumes:
       - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./mosquitto/config/mosquitto.passwd:/mosquitto/config/mosquitto.passwd
     networks:
       - attendance-net
     healthcheck:
@@ -46,6 +63,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
 
   backend:
     build:
@@ -81,6 +106,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
 
   frontend:
     build:
@@ -95,6 +128,14 @@ services:
       - backend
     networks:
       - attendance-net
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+        reservations:
+          cpus: '0.125'
+          memory: 64M
 
   gateway:
     build:
@@ -111,6 +152,8 @@ services:
       REDIS_PORT: ${REDIS_PORT}
       MQTT_BROKER: ${MQTT_BROKER}
       MQTT_PORT: ${MQTT_PORT}
+      MQTT_USERNAME: ${MQTT_USERNAME}
+      MQTT_PASSWORD: ${MQTT_PASSWORD}
       BACKEND_URL: ${BACKEND_URL}
       DEVICE_SERVICE_TOKEN: ${DEVICE_SERVICE_TOKEN}
       AES_KEY: ${AES_KEY}
@@ -135,6 +178,8 @@ services:
     environment:
       MQTT_BROKER: ${MQTT_BROKER}
       MQTT_PORT: ${MQTT_PORT}
+      MQTT_USERNAME: ${MQTT_USERNAME}
+      MQTT_PASSWORD: ${MQTT_PASSWORD}
       BACKEND_URL: ${BACKEND_URL}
       DEVICE_SERVICE_TOKEN: ${DEVICE_SERVICE_TOKEN}
       AES_KEY: ${AES_KEY}
@@ -147,6 +192,14 @@ services:
         condition: service_started
     networks:
       - attendance-net
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+        reservations:
+          cpus: '0.125'
+          memory: 64M
 
 networks:
   attendance-net:

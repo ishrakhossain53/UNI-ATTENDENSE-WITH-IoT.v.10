@@ -38,6 +38,8 @@ logger = logging.getLogger('Gateway')
 # Environment variables
 MQTT_BROKER = os.getenv('MQTT_BROKER', 'mosquitto')
 MQTT_PORT = int(os.getenv('MQTT_PORT', 1883))
+MQTT_USERNAME = os.getenv('MQTT_USERNAME')
+MQTT_PASSWORD = os.getenv('MQTT_PASSWORD')
 POSTGRES_HOST = os.getenv('POSTGRES_HOST', 'postgres')
 POSTGRES_PORT = int(os.getenv('POSTGRES_PORT', 5432))
 POSTGRES_DB = os.getenv('POSTGRES_DB', 'attendance_db')
@@ -105,6 +107,8 @@ def wait_for_dependencies(max_retries: int = 60) -> bool:
     for attempt in range(max_retries):
         try:
             test_client = mqtt.Client()
+            if MQTT_USERNAME and MQTT_PASSWORD:
+                test_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
             test_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=5)
             test_client.disconnect()
             mqtt_ok = True
@@ -314,6 +318,8 @@ def thread_template_sync_poller():
     def ack_listener():
         """Sub-thread to listen for template ACKs."""
         local_client = mqtt.Client()
+        if MQTT_USERNAME and MQTT_PASSWORD:
+            local_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
         local_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
         
         def on_ack_message(client, userdata, msg):
@@ -502,7 +508,12 @@ def main():
     # Connect to MQTT
     mqtt_client = mqtt.Client()
     mqtt_client.on_connect = on_mqtt_connect
-    
+
+    # Set authentication if credentials provided
+    if MQTT_USERNAME and MQTT_PASSWORD:
+        mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+        logger.info("✓ MQTT authentication configured")
+
     try:
         mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
         logger.info("✓ MQTT client created")

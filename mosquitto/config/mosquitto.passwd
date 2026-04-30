@@ -1,0 +1,5 @@
+# MQTT Password File
+# Format: username:password_hash
+# Generated with: mosquitto_passwd -c mosquitto.passwd mqtt_user
+# Default: mqtt_user / mqtt_pass123
+mqtt_user:$7$101$9R1E0Q7+rhNWocMS$B2vlf3COyx2XXIQj8yAKhOqRqMfF2GzjIb6NGir3MSHw1Vs4DbxaDl8cYhL2V8OV

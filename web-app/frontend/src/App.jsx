@@ -22,6 +22,7 @@ import Login from './components/Login.jsx'
 import AdminDashboard from './components/AdminDashboard.jsx'
 import FacultyDashboard from './components/FacultyDashboard.jsx'
 import StudentDashboard from './components/StudentDashboard.jsx'
+import ErrorBoundary from './components/ErrorBoundary.jsx'
 
 const THEME_KEY = 'ui-theme-mode'
 
@@ -177,7 +178,9 @@ function App() {
               path="/admin"
               element={
                 <ProtectedRoute requiredRole="admin">
-                  <AdminDashboard />
+                  <ErrorBoundary fallbackMessage="Admin dashboard encountered an error. Please try again or contact support.">
+                    <AdminDashboard />
+                  </ErrorBoundary>
                 </ProtectedRoute>
               }
             />
@@ -186,7 +189,9 @@ function App() {
               path="/faculty"
               element={
                 <ProtectedRoute requiredRole="faculty">
-                  <FacultyDashboard />
+                  <ErrorBoundary fallbackMessage="Faculty dashboard encountered an error. Please try again.">
+                    <FacultyDashboard />
+                  </ErrorBoundary>
                 </ProtectedRoute>
               }
             />
@@ -195,7 +200,9 @@ function App() {
               path="/student"
               element={
                 <ProtectedRoute requiredRole="student">
-                  <StudentDashboard />
+                  <ErrorBoundary fallbackMessage="Student dashboard encountered an error. Please try again.">
+                    <StudentDashboard />
+                  </ErrorBoundary>
                 </ProtectedRoute>
               }
             />
